@@ -8,7 +8,7 @@ using System.Text.Json.Nodes;
 namespace Ghosts.Api.Infrastructure.ScenarioDocuments;
 
 /// <summary>
-/// What POST api/scenarios/import just dropped, from the schema README's "What the API cannot hold"
+/// What POST api/scenarios/import just dropped, from the schema README's "What the columns cannot hold"
 /// table. Validate never calls this — it describes what an import did, and validate does not write
 /// anything — so it only runs after a document has passed the validator and CreateAsync has
 /// succeeded. It reports content the document actually carries, not every row of the table
@@ -119,8 +119,10 @@ public static class StorageLossAnalyzer
         var list = leaves.Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
         if (list.Count == 0) return;
         findings.Add(ScenarioFinding.Warn(Tier, "STORAGE_LOSSY", path,
-            $"No column for: {string.Join(", ", list)}. Import wrote the rest of this document and did not write these.",
-            "Expected, not a defect — see the schema README's \"What the API cannot hold\" table. An export of this scenario will not return them either."));
+            $"No column for: {string.Join(", ", list)}. The scenario's rows do not hold these; the stored document does.",
+            "Expected, not a defect — see the schema README's \"What the columns cannot hold\" table. " +
+            "GET {id}/document returns these until the scenario's rows are edited; after an edit, and always with ?derived=true, they are absent. " +
+            "Nothing in GHOSTS acts on them during play, so whatever they describe (an event's flags, the ladder, the deadline) the white cell runs by hand."));
     }
 
     /// <summary>True when the key is present with content: a non-empty string, a non-empty array or
