@@ -122,7 +122,7 @@ public static class StorageLossAnalyzer
             $"No column for: {string.Join(", ", list)}. The scenario's rows do not hold these; the stored document does.",
             "Expected, not a defect — see the schema README's \"What the columns cannot hold\" table. " +
             "GET {id}/document returns these until the scenario's rows are edited; after an edit, and always with ?derived=true, they are absent. " +
-            "Nothing in GHOSTS acts on them during play, so whatever they describe (an event's flags, the ladder, the deadline) the white cell runs by hand."));
+            "Nothing in GHOSTS acts on them during play. The white cell runs them by hand: an event's flags, the ladder, the deadline."));
     }
 
     /// <summary>True when the key is present with content: a non-empty string, a non-empty array or

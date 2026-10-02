@@ -32,7 +32,8 @@ public class StorageLossAnalyzerTests
             Assert.Contains("the stored document does", f.Message);
             Assert.Contains("\"What the columns cannot hold\"", f.Hint);
             Assert.Contains("GET {id}/document returns these", f.Hint);
-            Assert.Contains("white cell runs by hand", f.Hint);
+            Assert.Contains("Nothing in GHOSTS acts on them during play.", f.Hint);
+            Assert.Contains("The white cell runs them by hand: an event's flags, the ladder, the deadline.", f.Hint);
             Assert.DoesNotContain("What the API cannot hold", f.Message + f.Hint);
             Assert.DoesNotContain("export", f.Message + f.Hint, StringComparison.OrdinalIgnoreCase);
         });

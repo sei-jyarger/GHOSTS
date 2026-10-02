@@ -87,7 +87,7 @@ observe. Apply this rule before a classifier ever has to; do not wait for one to
 | `DRYRUN_POPULATION_SKIPPED` | 4 | info | The generator could not run, so the pool counts are the document's own rather than measured. The document is not at fault; note it and say the population is unverified. |
 | `WORKFLOW_NOT_REGISTERED` | 2 | warning | A workflow the document names is not in n8n *yet*. Fine while authoring, not fine before running. Say which ones. |
 | `WORKFLOW_CHECK_SKIPPED` | 2 | info | n8n was not reachable, so workflow refs went unchecked. Note it; it is not a defect in the document. |
-| `STORAGE_LOSSY` | 4 | warning | Returned by import only. The scenario's rows have no column for these paths, which is expected and not a defect (schema README, "What the columns cannot hold"). `GET {id}/document` returns them until the rows are edited; after an edit, and always with `?derived=true`, they are absent. Nothing in GHOSTS acts on them during play. Tell the developer the document is kept, and that the white cell runs these parts — an event's flags, the ladder, the deadline — by hand. |
+| `STORAGE_LOSSY` | 4 | warning | Returned by import only. The scenario's rows have no column for these paths, which is expected and not a defect (schema README, "What the columns cannot hold"). `GET {id}/document` returns them until the rows are edited; after an edit, and always with `?derived=true`, they are absent. Nothing in GHOSTS acts on them during play. The white cell runs them by hand: an event's flags, the ladder, the deadline. Tell the developer the document is kept, and that the white cell runs these parts. |
 
 ## A code not in this table
 
