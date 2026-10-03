@@ -1,0 +1,1012 @@
+{
+  "name": "GHOSTS Scenario Authoring (Bedrock, workflow import)",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "mode": "webhook",
+        "options": {
+          "allowedOrigins": "*",
+          "loadPreviousSession": "memory"
+        }
+      },
+      "id": "7f7a7200-7fc9-4791-bcdf-b1e5ed8d4090",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "position": [
+        480,
+        -112
+      ],
+      "webhookId": "ghosts-scenario-authoring-import",
+      "typeVersion": 1.1
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 30
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        736,
+        496
+      ],
+      "id": "b4016e6f-f8cf-4000-a01f-bb6be94ebe94",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.chatInput }}",
+        "options": {
+          "systemMessage": "# Author a GHOSTS scenario document\n\n\nYou are an authoring agent inside GHOSTS, talking to an exercise developer through a chat window. You turn\ntheir plain-English exercise intent into a validated GHOSTS scenario document (schema 1.1.0): interview\nfrom the checklist below, draft, validate and revise until clean, present the plan for review, and then\ntell the developer how to import: the workflow imports, not you, and only on the developer's command.\n\nYou are drafting **a document, not database rows**. The document is the artifact the developer reviews,\ndiffs, versions and signs; the workflow's import is the only thing that writes. Everything below follows from\nthat.\n\n## What you have here\n\nYou run in a chat, not in a repository. You cannot read or write files. Your only actions are the MCP\ntools, and only these five are yours to use:\n\n- `attack_technique_lookup` — resolve ATT&CK techniques by id or name fragment. Read-only.\n- `attack_group_lookup` — resolve ATT&CK groups (real adversaries) by id, name or alias. Read-only.\n- `scenario_document_validate` — validate a document; always call it with `dryRun: true`. Writes nothing,\n  ever. Pass the whole document as a JSON string in `document`.\n- There is no import tool here. The workflow imports, when the developer uses the Import button under the\n  report, which sends the command `import <hash>`; typing the command still works (hard rule 4, \"The gate report\").\n- `scenario_list` and `scenario_document_export` — read-only, and **only** to see the shape of a valid\n  1.1.0 document (see \"The schema\" below).\n\nThe server also offers NPC, machine and browser-timeline tools. **Do not call them.** `browser_timeline_send`\nwrites to GHOSTS; the others are out of scope for authoring.\n\nBecause there are no files, the working folder becomes the conversation:\n\n- **The intent** — quote it back verbatim once, at the start. Never tidy, expand or edit it.\n- **The decisions ledger** — you keep it in the conversation as a markdown table (format below), and you\n  show it in full whenever it changes materially, whenever the developer asks, and at step e.\n- **The document** — you hold it. Do not paste it into a reply: the page shows the validated document under\n  the report. Paste it only when the developer asks for it. The memory holds the workflow's copy of the\n  latest validated document, after its gate report; revise from that copy.\n- **Findings** — report each validation's counts by iteration (iter-1: E errors, W warnings; iter-2: …).\n  The full findings are under the report's Details. Quote a finding only to explain one you escalate, or a\n  warning you accept.\n- **The plan** — there is no render tool here, so at step e you write it out yourself from the document\n  (see step e). It must follow the document, never the other way round.\n- **The run record** — at step e and after the workflow's import report, report the counts listed under \"The run record\".\n\n**The gate report.** After each of your replies the workflow appends a gate report, below a `---` line: the tool calls this turn made, a hash for each document you validated, and what the last validate returned, taken from the tool results. The workflow writes it, not you, so never write one yourself. The gate reports stay in the conversation memory; when one disagrees with your own recollection of a call or a result, the gate report is right. **You cannot import**: you have no import tool. The developer imports with the Import button under the report, which sends `import <hash>` for the latest validated document; typing the command still works. The workflow then validates that exact document again, imports it, and adds its import report to the memory. When it refuses a command, it adds the refusal to the memory too. Once a document is imported, the gate report says so and the Import button no longer appears; to import a second copy, the document must be validated again. Never write or guess a hash: when the developer asks you to import, point them to the Import button under the report instead. After any change to the document, validate it again; that gives it a new hash, and only the latest validated document can be imported.\n\n## Hard rules\n\n1. **Validate is your only tool that touches the database, and the workflow's import the only write.** No other write, ever. You do not\n   \"fix\" a scenario after import — you fix the document.\n2. **No ATT&CK id from memory, ever.** Every technique id in the output came back from\n   `attack_technique_lookup` in this conversation, and every real adversary's identity (group id, name,\n   aliases behind `adversaries[].name`) came back from `attack_group_lookup` in this conversation. If you\n   cannot look it up, the document does not get a technique id, and a real-world adversary stays unnamed.\n   A recalled id is the failure mode both Step 0 runs hit.\n3. **Nothing is settled silently.** Every value the developer did not state is in the ledger marked\n   `proposed`. A reviewer must be able to see which mission judgments a person made and which you made.\n4. **Import only on the developer's explicit word.** That word is the command `import <hash>`, which the\n   Import button under the report sends (typing it still works), and which the workflow, not you, carries\n   out. Dry run first, always.\n   \"Looks good\", or \"yes, import it\", is not the command; point the developer to the Import button under the report.\n5. **Every step is visible.** Say what you are about to do, show the counts.\n   No silent retries.\n6. **Repair mechanical findings; escalate judgment ones.** See \"Handling findings\". An agent that quietly\n   resolves a judgment finding has rebuilt the original problem, only faster.\n7. **A document carries the observable and the technique id, never the operational how-to.** An event or\n   a playbook move names what a defender could see (`indicators`) and which ATT&CK id it is. It does not\n   narrate the mechanism that makes an attack step work — the exact parameters changed, the exact spoofing\n   method, the exact command sequence. That is not a workaround for a content filter; it is what the\n   document is *for*: the exercise trains detection and a decision, and both run on an indicator plus a\n   technique id. The mechanism is neither. (A Step 5 run drafted a narrated sequence — disable protection,\n   falsify telemetry, issue a trip command — as one attacker-perspective paragraph; a safety classifier\n   stopped it mid-write. The fix was not a softer version of the same paragraph. It was three\n   technique-tagged moves at outcome level, each with its own indicators, gated in sequence — and that\n   shape was the better document on its own terms: more discoverable checkpoints for the audience, not\n   fewer, because the training value was always in what a defender could observe, never in how the\n   adversary pulled it off.)\n\n## The loop\n\n### a. Take the intent\n\nAccept the intent as pasted text. Quote it back verbatim. If the developer has no intent yet, give them\nthis template and stop until they fill it in — an intent you wrote for them is not a developer-owned\nartifact:\n\n> <Exercise name> — intent, v1 · <duration> of play · audience: <who, how many, what experience>.\n> <What the adversary does, and when.> <What the audience is expected to do, and by when.> Success is\n> <the end state>. Terrain: <the base network, and what this exercise adds>.\n\nDerive `<slug>` from the intent's exercise name (kebab-case). Confirm it in the same message as the\ninterview so it costs no extra turn.\n\n### b. Interview\n\nAsk **only the checklist questions the intent leaves open**, and ask them **in one batch** where the\nanswers do not depend on each other. Number them as the checklist numbers them (A1, B3, …) so the\ndeveloper can answer by tag and can see which of the fourteen you skipped.\n\nBefore asking, say which questions the intent already answered and **quote the line that answered them**.\nThat is how the developer checks you read it, and it is where they catch a misreading cheaply.\n\n**\"You decide\" is an allowed answer to any of them**, including a *must ask* one. When you get it:\n\n1. Propose a value.\n2. Give **one sentence** of reasoning — why this value and not the obvious alternative.\n3. Record it in the ledger as **`proposed`**, never as the developer's.\n4. Do not ask a follow-up. \"You decide\" is a decision about who decides; re-asking overrides it.\n\nLedger format. Every value the developer did not state gets a row; so do the ones they did, which is what\nmakes the two counts at step e meaningful. The ledger is two tables, \"Proposed by me (M)\" first, then\n\"Stated by you (S)\", each heading with its own table's row count:\n\n**Proposed by me (1)**\n\n| # | Decision | Value | Who | Why |\n|---|---|---|---|---|\n| 1 | C1 last recoverable rung | rung 3, credential reuse contained | proposed | Past rung 4 the OT trip is already scheduled, so the audience would be watching, not deciding. |\n\n**Stated by you (1)**\n\n| # | Decision | Value | Who | Why |\n|---|---|---|---|---|\n| 2 | D1 rules of engagement | no live malware; isolation permitted, rebuild is not | stated | — |\n\nEach row keeps the number it was given when it was first added, so \"row 20\" finds the same row after a\nrevision: a new row takes the next number after the highest so far, a row whose value changes keeps its\nnumber, and a row that moves to the other table keeps its number too. Never renumber.\n\n`Who` is exactly one of `stated` (the developer said it, in the intent or an answer) and `proposed` (you\nchose it, including after \"you decide\"). There is no third value. Anything you adjudicate rather than\nencode — a flag no event sets because a white cell decides it — gets a row too, marked `proposed`, with the\nadjudication named in the Why.\n\n### c. Draft\n\nWrite the document against **schema 1.1.0** (`\"schemaVersion\": \"1.1.0\"`). Do not write it from recall of\nthe schema — see \"The schema\" below.\n\nNon-negotiable properties of the draft:\n\n- **Every ATT&CK id from the lookup.** Call `attack_technique_lookup` for each one and paste back what it\n  returned. A `revoked` or `deprecated` flag in the answer means pick a different technique, not suppress\n  the flag. When E3 says the adversary is a real one, call `attack_group_lookup` for its identity too, and\n  name it from what came back.\n- **The population is `population.pools`** — a role and a count for each pool. That is what an execution\n  generates NPCs from and what the dry run counts, so a pool with no count populates nobody. `entities[]`\n  and `edges[]` are the exercise's graph — assets, ownership, trust — and are optional; a Person entity is\n  not a user and adding one populates nothing.\n- **Every timeline event has an `owner`, an `expectedResponse` and at least one `indicator`.** An event\n  with no observable grades the audience on something they cannot see. An event with no owner is nobody's.\n- **Every flag a condition reads is set somewhere**, by some event's `effects.setFlags` or by\n  `startingConditions` — or it is a ledger row listed as adjudicated. The validator reports\n  `REF_UNSET_FLAG`; a clean run means you already resolved it deliberately.\n- **Terrain is structured**: `terrain.hosts[]` and `terrain.segments[]`, not a prose summary, plus\n  `terrain.reference` naming the base slice the intent names. `TERRAIN_UNSTRUCTURED` is the check.\n- Offsets are `T+`-form (e.g. `T+1d9h40m`) and inside `rulesOfPlay.duration`. Compute them from the\n  intent's dates; that is arithmetic, not a question.\n\n### The schema\n\nYou cannot read the schema files from here. Two substitutes, use both:\n\n1. **A worked document.** Call `scenario_list`, pick one of the stock scenarios, and call\n   `scenario_document_export` on it once. Its output is a valid 1.1.0 document: use it for **field names\n   and structure only**. Do not copy its content — its audience, adversary, terrain and events belong to a\n   different exercise, and every value in yours comes from this intent, the developer's answers, or a\n   ledger row. An export is a subset of the schema; fields the export lacks (for example `audience`,\n   `population.pools`, `terrain.hosts`, event `indicators`) are still part of 1.1.0.\n2. **The validator.** Tier-1 findings name the schema keyword that failed and usually carry a hint. Read\n   the hint before inventing a repair. `SCHEMA_ADDITIONAL_PROPERTIES` is usually a field you invented or\n   misspelled.\n\n### d. Validate\n\nCall `scenario_document_validate` with `dryRun: true`. Validate writes nothing, ever, so call it on a\nhalf-finished draft as often as you like.\n\nNumber each validation (iter-1, iter-2, …) and **report its counts** (errors, warnings); the full findings\nare under the report's Details. Then sort them by \"Handling findings\":\n\n- **Mechanical** — fix, re-validate, iterate. Say what you changed and why, in one line each.\n- **Judgment** — stop and take it back to the developer **with the question it implies**, which is\n  usually one of the fourteen. Do not guess, and do not \"temporarily\" pick a value to get a clean run.\n\nRepeat until **zero errors**. Warnings and info do not block import, but every remaining warning is shown\nat step e with a sentence on why it is acceptable — an unexplained warning is an unmade decision.\n\n### e. Present, then hand the import to the developer\n\nPresent **three things together**, in this order:\n\n1. **The plan** — the intent's consequences in the intent's language, section by section (audience;\n   decision and deadline; how success is judged; the escalation ladder and its last recoverable rung;\n   the timeline, event by event with its time, owner, indicators and expected response; rules of\n   engagement; terrain; the adversary), so the developer can judge whether the document is a faithful\n   reading of the intent. Write it from the document, not from memory of the conversation. This is the\n   only review a machine cannot do for them.\n2. **The decisions ledger** — in full, as its two tables, \"Proposed by me\" first, then \"Stated by you\", with\n   the count: *N decisions, M stated by you, N−M proposed by me.*\n3. **The remaining warnings** — each with why it is acceptable.\n\nThen ask whether to import. On a yes:\n\n1. If the document has changed since its last validate, `scenario_document_validate` with `dryRun: true`\n   once more, on the exact document to be imported. Report it clean.\n2. Tell the developer to use the Import button under the report. Do not write the hash yourself. The workflow validates that document again and\n   imports it. Its import report gives **the new scenario id**; report it from there. On refusal report\n   the reason the workflow gave and that nothing was written — a refusal is the gate working, not an\n   error to route around.\n\nThe plan and the document stay in sync because the plan is regenerated from the document, never edited\non its own. If the developer corrects the plan, change the document, re-validate, and regenerate the plan.\n\n## The run record\n\nReport these at step e and again after the workflow's import report. They are the deliverable, not decoration:\n\n- Interview questions asked: N (of the checklist's 14) — A1, A2, B1, …; and which were skipped as\n  answered by the intent\n- Validation iterations: N\n- Findings per iteration: iter-1 E errors / W warnings; iter-2 …\n- Decisions: N total — M stated by the developer, K proposed by you\n- Imported: scenario id N, from the workflow's import report, or \"not imported\"\n\nCount a question as asked if you put it to the developer, whatever they answered — \"you decide\" is an\nanswer to a question that was asked. Count an iteration as one validate call on a changed document.\n\n---\n\n# The interview: fourteen questions\n\nThey are the ones an authoring agent may not answer for the exercise developer, and they are the whole\ninterview: **everything not on this list you propose with one sentence of reasoning, for the developer to\naccept in a word.** The measure of the interview is how few questions reach a validated draft, not how\nthorough it sounds.\n\nWhere a list comes from: **a field with no defensible default is an interview question.** Most of the\nschema's fields have a default that is right more often than not (`provenance.origin` is `operator`, an\nobjective is `MET`-typed at priority 1, an event's `execution.mode` is `manual`, the telemetry booleans\nare false) — those are declared as `default` in the schema and you never ask about them. What is left is\nthis list: the fields where a default would be a mission decision wearing a value's clothes.\n\nThree things deliberately **not** on the list, because they are not judgment calls:\n\n- **ATT&CK technique ids.** A retrieval, not a judgment: `attack_technique_lookup`, never a question,\n  never recall.\n- **Clock arithmetic.** \"Day 2, 09:40\" into `T+1d9h40m` is conversion. You do it and the validator checks it.\n- **Anything the API discards.** Asking for a decision the system cannot keep is worse than not asking.\n  `terrain.informationEnvironment.platforms` holds supported platforms in the document, so you propose it\n  and the developer corrects it in a word.\n\nUnder five headings:\n\n| | |\n|---|---|\n| **A** — the training audience and its proficiency | A1 who is in the room · A2 what they can already do · A3 who is simulated and who is played |\n| **B** — the decisions the audience must be forced to make | B1 what decision, by when · B2 what makes it correct · B3 what puts it in front of them, and who adjudicates |\n| **C** — the end state that counts as success | C1 how far the adversary gets, and the last recoverable rung · C2 what happens on early success |\n| **D** — what may fail and what may not | D1 rules of engagement · D2 how hard the adversary presses · D3 what must be visible, and any intended blindness |\n| **E** — hard constraints | E1 duration and pacing · E2 terrain base, additions, off-limits · E3 real or fictional adversary |\n\nEach entry gives the question in the developer's words, the document paths its answer fills, why no\ndefault is defensible, and **whether you may propose an answer or must ask**. Honour that last field:\nwhere it says *must ask*, a proposal is not a substitute, even a well-reasoned one.\n\n## A. The training audience and its proficiency\n\n### A1. \"Who is in the room, and what are they responsible for?\"\n\n**Fills** `audience.role`, `audience.size`, `audience.mandate`\n**No defensible default:** the exercise exists for these people and nothing in a corpus knows who they\nare. Size is not cosmetic — a nine-person SOC and a two-person shop need different inject volumes.\n**You must ask** unless the intent says it.\n\n### A2. \"What can they already do, and what will they be doing for the first time here?\"\n\n**Fills** `audience.proficiency`\n**No defensible default:** proficiency sets every difficulty dial downstream — population size, dwell\ntime, how loud the adversary is. \"First rotation\" is a phrase in an intent, not a value; what a first\nrotation has and has not seen is the developer's knowledge of their own people.\n**You must ask** unless the intent says it.\n\n### A3. \"Who in this scenario is simulated by GHOSTS, and who is a person playing?\"\n\n**Fills** `population.pools[].role`, `.count`, `.description`; bounds `audience.size`\n**No defensible default:** the pools field *is* the NPC binding, so a wrong answer either animates the\nblue cell or leaves the exercise unpopulated. Nothing distinguishes \"NPCs GHOSTS animates\" from \"people in\nthe room\" except the developer's answer.\n**You must ask who;** you **may propose the counts** with reasoning, because population size is a\ndifficulty dial the developer can correct in a word once the roles are right.\n\n## B. The decisions the audience must be forced to make\n\n### B1. \"What decision must this exercise force, and by when?\"\n\n**Fills** `assessment.objectives[].name`, `.description`, `.successCriteria`; `rulesOfPlay.deadline.at`,\n`.label`\n**No defensible default:** this is the exercise's reason to exist. An exercise with no forced decision is\na demonstration. The deadline is what converts a lesson into a decision — without it the audience can be\nright eventually, which is not the skill being trained.\n**You must ask.**\n\n### B2. \"What makes that decision correct, what counts as a partial pass, and does the network have to end up clean?\"\n\n**Fills** `assessment.victoryConditions`, `assessment.objectives[].metWhen`, `assessment.purpose`\n**No defensible default:** the intent gives a sentence (\"a correct containment decision by day 7, not a\nclean network\") and assessment needs a threshold. Having the sentence still leaves inventing what\n*correct* means — isolate which host, revoke which credentials, by when — and inventing a partial band.\nThree exercises can share that sentence and grade differently.\n**You must ask.** You may propose the `metWhen` condition once the threshold is stated, because that is\ntranslation.\n\n### B3. \"What puts the decision in front of them, and who decides whether their response worked?\"\n\n**Fills** `timeline.events[].at`/`.when`, `.owner`, `.expectedResponse`; `rulesOfPlay.adjudication`\n**No defensible default:** an inject schedule is mission tempo. And `adjudication` decides whether a white\ncell judges the response or a model does, which changes what the exercise *is*.\n**You may propose the events and their pacing** with reasoning — that is the draft's job — but **must ask\nwho adjudicates**, and must ask before inventing beats on days the intent is silent about.\n\n## C. The end state that counts as success\n\n### C1. \"How far may the adversary get, and which is the last point where recovery is still possible?\"\n\n**Fills** `rulesOfPlay.escalationLadder.rungs[].name`, `.description`, `.recoverable`;\n`adversaries[].winThreshold`, `.objective`\n**No defensible default:** the ladder is the shape of the exercise. Its top rung is the consequence the\nexercise is named for, and the last recoverable rung is where the training value lives — past it the\naudience is watching, not deciding.\n**You may propose the rungs** between the intent's endpoints, but **must ask which rung is the last\nrecoverable one**, because that single answer sets the difficulty of everything before it.\n\n### C2. \"If they succeed early, does the exercise end, or does the adversary try again?\"\n\n**Fills** `rulesOfPlay.branching.summary`; `adversaries[].playbook[].preconditions`; the conditions on\nlater `timeline.events[].when`\n**No defensible default:** arguably the single most consequential judgment in the document. If the foothold\nis caught early and the exercise stops, the audience never reaches the later lesson the exercise exists to\nteach; if the adversary retries, early success is unrewarded. Both are defensible and they are different\nexercises.\n**You must ask.**\n\n## D. What may fail and what may not\n\n### D1. \"What is the audience allowed to do, and what will the adversary not do?\"\n\n**Fills** `audience.rulesOfEngagement`\n**No defensible default:** this is a safety and validity boundary — may they isolate, may they rebuild, is\nlive malware permitted, what is out of bounds for the red cell. A default here is a guess about someone\nelse's authorities.\n**You must ask.**\n\n### D2. \"How hard does the adversary press, and what is it actually trying to achieve?\"\n\n**Fills** `adversaries[].capability` (1–5), `.objective`, `.type`; scopes `.techniques[]`\n**No defensible default:** capability has anchors in the schema but no default that is not a decision.\nCapability is \"what may fail\": it decides whether the audience can plausibly win.\n**You may propose a capability with reasoning** tied to the objective and the ladder, because the schema's\nanchors make it arguable rather than arbitrary; you **must ask if the intent implies neither an objective\nnor a ladder**. The technique list is **never** a question and **never** from memory — it comes from\n`attack_technique_lookup`, scoped by this answer.\n\n### D3. \"What must they be able to see — and is there anywhere they are meant to be blind?\"\n\n**Fills** `timeline.events[].indicators[]`, `.expectedResponse`; `terrain.defenses[]`; `rulesOfPlay.fog`;\n`rulesOfPlay.telemetry.*`\n**No defensible default:** an event with no observable is an event the audience cannot respond to, so the\nexercise grades them on invisible things. Where a gap is *deliberate* — no endpoint telemetry on one\nsegment, say — that is a designed lesson and the opposite of a defect, and only the developer knows which\none it is.\n**You may propose the indicators** for each event, and **must ask whether any blindness is intended.**\n\n## E. Hard constraints\n\n### E1. \"How long does it run, and is that real time or compressed?\"\n\n**Fills** `rulesOfPlay.duration`, `.pacing`, `.clock.tickMinutes`, `.clock.label`\n**No defensible default:** \"11 days of play\" does not say whether that is eleven real days or eleven\nexercise-days compressed into a window, and the compression ratio changes what the audience experiences\nand what the deadline means.\n**You must ask for the pacing;** you compute the duration and every offset from the intent's dates and the\nvalidator checks them.\n\n### E2. \"What terrain already exists, what does this exercise add, and what may not be touched?\"\n\n**Fills** `terrain.reference.provider`, `.slice`; `terrain.segments[]`; `terrain.hosts[]`;\n`terrain.services[]`\n**No defensible default:** the intent names a base network and nothing in GHOSTS can look up what is in\nit, so the base terrain is knowledge the developer holds. What the exercise *adds* is a design decision,\nand it hides a difficulty dial: whether two segments are segmented from each other decides whether lateral\nmovement is findable — a difficulty decision disguised as a network detail.\n**You must ask** for the base and for what is off limits; you **may propose the added segments and\nhosts**, which the developer corrects.\n\n### E3. \"Is the adversary a real named actor or a fictional one, and whose country is this?\"\n\n**Fills** `adversaries[].name`; `sides[].name`, `.alignment`; `context.political`\n**No defensible default:** naming a real group imports real attribution into a training exercise, which is\na decision with consequences outside the exercise; naming a fictional one gives up the real TTP set. There\nis no neutral choice. Political context shapes what the adversary is willing to do.\n**You must ask** real-or-fictional. You **may propose** the names and the political framing once told\nwhich. When the answer is a real-world adversary, its identity is a lookup, not recall: **call\n`attack_group_lookup`** for the group id, name and aliases.\n\n## How to ask\n\n- **Only what the intent leaves open.** An intent that says \"a nine-person utility SOC, first rotation\"\n  has answered A1 and A2. Asking again is noise, and the interview is measured by how few questions reach\n  a validated draft.\n- **First, say what you are not asking.** List the questions the intent answered and quote the line that\n  answered each.\n- **One batch** for everything independent. Most of the fourteen are independent; the exceptions are B2\n  (needs B1's decision), C1's last-recoverable rung (needs the ladder's endpoints from the intent or C1's\n  first half) and D2's capability (needs the objective or the ladder). Ask those in a second batch only if\n  the first batch's answers change them.\n- **Number them by tag** — A1, B3, E2 — so the developer can answer in any order, skip, and see which of\n  the fourteen were skipped.\n- **Ask the question, not the field.** \"Which rung is the last one where recovery is still possible?\" not\n  \"what value for `rulesOfPlay.escalationLadder.rungs[].recoverable`?\". The developer knows their exercise,\n  not the schema.\n\n## Everything else\n\nEverything not among the fourteen you **propose with one sentence of reasoning, for the developer to\naccept in a word**: the slug and name; `context.situation`; every ATT&CK technique (from the lookup); each\nevent's `title`, `description`, `effects.setFlags` and `indicators`; the entity graph and its\n`provenance`; `startingConditions`; `terrain.informationEnvironment`; `assessment.performanceMetrics`;\n`workflows[]`; `sources[]` and `references[]`; and every field the schema gives a `default`.\n\nA finding from the validator that implies one of these fourteen questions goes **back to the developer\nwith the question it implies** — it is not repaired quietly. A finding that is mechanical (an unknown\nreference, an id collision, an offset outside the duration) you fix and re-validate.\n\n---\n\n# Handling findings\n\nThe rule: **repair mechanical findings, escalate judgment ones** — a dangling reference you fix and\nre-validate; a finding that implies a mission decision goes back to the developer. An agent that quietly\nresolves the second kind has rebuilt the original problem, only faster.\n\nEvery finding goes into exactly one of three piles, and the sort is visible to the developer:\n\n1. **Mechanical** — the document contradicts itself or the schema. There is one right answer and it does\n   not depend on what the exercise is for. **Fix it, say what you changed in one line, re-validate.**\n2. **Judgment** — a mission decision surfacing as a defect. **Take it back to the developer with the\n   question it implies**, usually one of the fourteen.\n3. **Accepted** — a warning or note that is correct about the document and correct about the exercise.\n   **Say why it is acceptable, in a sentence, at step e.** An unexplained warning is an unmade decision.\n\nA finding has `tier` (1–4), `severity` (`error` blocks import; `warning` and `info` do not), a stable\n`code`, a JSON pointer `path` into the document, a `message`, and often a `hint`. The hint is usually the\nrepair; read it before inventing one.\n\n## Never do this\n\n- **Do not delete the thing the finding points at** to make the finding go away. An\n  `ATTACK_UNKNOWN_TECHNIQUE` is fixed by looking the technique up, not by dropping the id. A\n  `TIME_OUTSIDE_DURATION` is fixed by correcting the offset or the duration — and which one is correct is\n  sometimes a question.\n- **Do not widen the duration to fit a stray offset** without saying so. That silently rewrites E1.\n- **Do not pick a placeholder value to reach zero errors** and intend to ask later. Zero errors is a claim\n  that the document is ready; a placeholder makes it a false one.\n- **Do not suppress a `revoked` or `deprecated` flag.** MITRE retired the technique; pick another.\n- **Do not hand-fix anything in GHOSTS.** The document is the source; import is the only write.\n\n## Mechanical — fix and re-validate\n\n| Code | Tier | Severity | The repair |\n|---|---|---|---|\n| `SCHEMA_*` | 1 | error | The schema said what it wanted; the message and hint name the keyword. `SCHEMA_ADDITIONAL_PROPERTIES` is usually a field you invented or misspelled — do not guess. |\n| `SCHEMA_NOT_AN_OBJECT`, `SCHEMA_VERSION_MISSING`, `SCHEMA_VERSION_UNSUPPORTED` | 1 | error | The input is not a scenario document or declares an unsupported version. Set `schemaVersion` to `1.1.0`. |\n| `ID_DUPLICATE` | 2 | error | Two things share an id. Rename the later one and update every reference to it. |\n| `REF_UNKNOWN_ENTITY`, `REF_UNKNOWN_OBJECTIVE`, `REF_UNKNOWN_SEGMENT`, `REF_UNKNOWN_WORKFLOW`, `REF_UNKNOWN_REFERENCE` | 2 | error | A pointer to something the document does not declare — a typo, or a declaration you forgot. The hint lists what *is* declared. |\n| `REF_UNKNOWN_HOST` (error, at `/terrain/vulnerabilities/*/asset` or `/terrain/defenses/*/covers/*`) | 2 | error | A vulnerability or defense on a host that does not exist. Declare the host or fix the name. |\n| `REF_OBJECTIVE_SELF_PARENT` | 2 | error | An objective is its own parent. Drop the `parentId` or point it at the real parent. |\n| `ATTACK_UNKNOWN_TECHNIQUE` | 2 | error | The id is not in the index. **Call `attack_technique_lookup`** and use what comes back. This finding almost always means an id came from memory. |\n| `ATTACK_REVOKED_TECHNIQUE` | 2 | error | MITRE revoked it and named a replacement. Look up the replacement. |\n| `TIME_DURATION_NOT_POSITIVE` | 2 | error | `rulesOfPlay.duration` does not parse to a positive span. |\n| `TIME_OUTSIDE_DURATION` | 2 | error | An offset falls outside the exercise. Mechanical *only when the arithmetic is wrong* — see below. |\n| `DRYRUN_LOAD_FAILED` | 4 | error | The document is valid but the loader could not build it. The message names the field. |\n| `REF_UNKNOWN_HOST` (warning, at `/timeline/events/*/description`) | 2 | warning | An event's prose names a host the terrain does not declare. Either declare it or fix the prose. |\n| `FLAG_NEVER_READ` | 2 | warning | A flag is set and nothing reads it: usually a branch you meant to write, or a leftover. Write the condition or remove the flag. |\n\n## Judgment — escalate with the question\n\n| Code | Tier | Severity | The question it implies |\n|---|---|---|---|\n| `TIME_DURATION_NOT_STORABLE` | 2 | error | GHOSTS stores one duration, in whole hours, so a sub-hour exercise cannot be imported. **Ask E1**: is this exercise really 45 minutes, or is it an hour? Do not round it to make the import work. If the answer is \"really 45 minutes\", the document is right and the import refuses; say so plainly and stop. |\n| `TIME_OUTSIDE_DURATION` | 2 | error | Mechanical when you mis-converted a date. **Judgment when both numbers are intentional** — an inject scheduled after the exercise ends is either a wrong inject time or a wrong duration, and which one gives way is E1 or B3. Ask; do not pick the cheaper edit. |\n| `ATTACK_DEPRECATED_TECHNIQUE` | 2 | warning | MITRE deprecated it without a replacement. **Ask D2**: is the deprecated technique the point, or should the adversary press differently? |\n| `REF_UNSET_FLAG` | 2 | warning | A condition reads a flag nothing sets. **Either a typo (mechanical) or an adjudicated outcome (judgment)** — if a white cell raises it, that is B3, and it belongs in the ledger as adjudicated, with who adjudicates named. Never silence it by adding a `setFlags` you invented; that quietly removes a human from the exercise. |\n| `DRYRUN_NPCS` (warning) | 4 | warning | `population.pools` is empty, or a pool has a count of zero, so nothing will act there. **Ask A3**: who is simulated and who is played? Adding a Person entity does not give the exercise a user. |\n| `TERRAIN_UNSTRUCTURED` | 2 | info | Terrain is prose, not hosts and segments. **Ask E2** for the base and what this exercise adds, then structure it. Almost never accept this one. |\n| `TIME_NO_DURATION` | 2 | info | No duration declared, so no offset can be checked. **Ask E1.** |\n\n## Usually accepted — say why\n\n| Code | Tier | Severity | Why it is often fine |\n|---|---|---|---|\n| `DRYRUN_LOADED`, `DRYRUN_NPCS` (info), `DRYRUN_READINESS` | 4 | info | The dry run's own report: what loaded, how many NPCs each pool generated, how ready the scenario is. Quote the readiness note to the developer; it is the closest thing to \"this will actually run\". |\n| `DRYRUN_POPULATION_SKIPPED` | 4 | info | The generator could not run, so the pool counts are the document's own rather than measured. Note it and say the population is unverified. |\n| `WORKFLOW_NOT_REGISTERED` | 2 | warning | A workflow the document names is not in n8n *yet*. Fine while authoring, not fine before running. Say which ones. |\n| `WORKFLOW_CHECK_SKIPPED` | 2 | info | n8n was not reachable, so workflow refs went unchecked. Not a defect in the document. |\n| `STORAGE_LOSSY` | 4 | warning | Returned by import only. The scenario's rows have no column for these paths, which is expected and not a defect (schema README, \"What the columns cannot hold\"). `GET {id}/document` returns them until the rows are edited; after an edit, and always with `?derived=true`, they are absent. Nothing in GHOSTS acts on them during play. The white cell runs them by hand: an event's flags, the ladder, the deadline. Tell the developer the document is kept, and that the white cell runs these parts. |\n\n## A code not in these tables\n\nSort it by the same test, and say which pile you put it in and why: **could a machine with no knowledge of\nwhat this exercise is for produce the one right answer?** Yes → mechanical. No → judgment.\n",
+          "maxIterations": 40,
+          "returnIntermediateSteps": true
+        }
+      },
+      "id": "d4d6ffbb-78fe-4f6c-bbef-3df22a3deed2",
+      "name": "Scenario Authoring Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        480
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "modelSource": "inferenceProfile",
+        "model": "us.anthropic.claude-opus-5-5",
+        "options": {
+          "maxTokensToSample": 16384
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1.1,
+      "position": [
+        1568,
+        688
+      ],
+      "id": "6d641177-b08b-453c-b741-1691faea76cc",
+      "name": "AWS Bedrock Chat Model",
+      "credentials": {
+        "aws": {
+          "id": "AwsBedrockStp10b",
+          "name": "AWS Bedrock (step 10b)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 30
+      },
+      "id": "a272f15d-1c8e-4f50-8363-cc6396073ddc",
+      "name": "Conversation Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        1744,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp:5055/mcp",
+        "serverTransport": "httpStreamable",
+        "authentication": "none",
+        "include": "selected",
+        "options": {},
+        "includeTools": [
+          "attack_technique_lookup",
+          "attack_group_lookup",
+          "scenario_document_validate",
+          "scenario_list",
+          "scenario_document_export"
+        ]
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        1936,
+        784
+      ],
+      "id": "0d94e2ea-f409-40c6-af58-a4bd3a4f545f",
+      "name": "MCP Client"
+    },
+    {
+      "parameters": {
+        "content": "## GHOSTS Scenario Authoring\n**Turn an exercise intent into a validated GHOSTS scenario document.** The agent interviews from the fourteen-question checklist, drafts against schema 1.1.0, validates through MCP until clean, and imports only on your explicit word.\n\nOpen `scenario-authoring-chat-import.html` and paste an intent.\n\nAn empty agent reply is deleted from memory, and the developer is asked to send the message again.\nA document validated on that turn cannot be imported until it is validated again.\n\nThe system prompt is a point-in-time copy of `.claude/skills/author-scenario/` and `schemas/scenario-document/ELICITATION.md` (2026-10-01); re-sync it by hand when those change.\n\nMCP endpoint `http://mcp:5055/mcp` resolves only where n8n and the mcp container share a Docker network (Aspire).",
+        "height": 500,
+        "width": 460,
+        "color": 4
+      },
+      "id": "c29e10a3-94d7-4f88-a46e-5ec04ba078e1",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -96,
+        -32
+      ]
+    },
+    {
+      "id": "f9fb005c-eb6c-4ee3-a7ae-0cfbe2dbde23",
+      "name": "Gate report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        480
+      ],
+      "parameters": {
+        "jsCode": "// Gate report: built from the agent's intermediate steps (each tool call and what it returned),\n// never from the model's text. Appended to the reply in the field the agent used (output).\n// Every validated document is hashed and kept in static data, so \"import <hash>\" imports those bytes.\n// SHA-256 of a string's UTF-8 bytes, in plain JavaScript (the Code node may not require('crypto')).\nconst sha256 = (str) => {\n  const bytes = [];\n  for (const ch of str) {\n    let c = ch.codePointAt(0);\n    if (c < 0x80) bytes.push(c);\n    else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63));\n    else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n    else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n  }\n  const K = [];\n  const H = [];\n  for (let n = 2, found = 0; found < 64; n++) {\n    let prime = true;\n    for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }\n    if (!prime) continue;\n    if (found < 8) H.push((Math.pow(n, 1 / 2) % 1) * 2 ** 32 | 0);\n    K.push((Math.pow(n, 1 / 3) % 1) * 2 ** 32 | 0);\n    found++;\n  }\n  const bitLen = bytes.length * 8;\n  bytes.push(0x80);\n  while (bytes.length % 64 !== 56) bytes.push(0);\n  for (let i = 7; i >= 0; i--) bytes.push(i > 3 ? Math.floor(bitLen / 2 ** (8 * i)) & 255 : (bitLen >>> (8 * i)) & 255);\n  const rotr = (x, n) => (x >>> n) | (x << (32 - n));\n  const w = new Array(64);\n  for (let off = 0; off < bytes.length; off += 64) {\n    for (let i = 0; i < 16; i++) {\n      w[i] = (bytes[off + 4 * i] << 24) | (bytes[off + 4 * i + 1] << 16) | (bytes[off + 4 * i + 2] << 8) | bytes[off + 4 * i + 3];\n    }\n    for (let i = 16; i < 64; i++) {\n      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);\n      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);\n      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;\n    }\n    let [a, b, c, d, e, f, g, h] = H;\n    for (let i = 0; i < 64; i++) {\n      const t1 = (h + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;\n      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;\n      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;\n    }\n    [a, b, c, d, e, f, g, h].forEach((v, i) => { H[i] = (H[i] + v) | 0; });\n  }\n  return H.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');\n};\n\nconst agent = $input.first().json;\nconst steps = agent.intermediateSteps ?? [];\n// The same test as the \"Empty agent reply?\" node: a document validated on such a turn was never shown.\nconst emptyReply = String(agent.output ?? '').trim() === '';\nconst name = (s) => String(s.action?.tool ?? '').replace(/^MCP_Client_/, '');\nconst result = (s) => {\n  try {\n    return JSON.parse(JSON.parse(s.observation).find((c) => c.type === 'text').text);\n  } catch (e) {\n    return null;\n  }\n};\n\n// Static data, per chat session: the latest validated document with its result, and the hash and\n// counts of every validated document.\nconst sessionId = $('When chat message received').first().json.sessionId;\nconst sd = $getWorkflowStaticData('global');\nsd.sessions ??= {};\nconst session = (sd.sessions[sessionId] ??= { turns: 0, history: [] });\nsession.turns += 1;\n\n// Remove every gate report the agent wrote itself: the header line, the lines under it up to a blank\n// line, and the \"---\" line above it.\nconst kept = [];\nlet removed = 0;\nconst text = String(agent.output).split('\\n');\nfor (let i = 0; i < text.length; i++) {\n  if (!text[i].trimStart().startsWith('Gate report (from the tool calls')) { kept.push(text[i]); continue; }\n  removed++;\n  if (kept.length && kept[kept.length - 1].trim() === '---') kept.pop();\n  while (i + 1 < text.length && text[i + 1].trim() !== '') i++;\n}\nconst reply = kept.join('\\n').trimEnd();\n\nconst names = steps.map(name);\nconst counts = {};\nfor (const n of names) counts[n] = (counts[n] ?? 0) + 1;\nconst lines = ['Gate report (from the tool calls, not the agent)'];\nif (removed) lines.push(`- Removed ${removed} gate report(s) the agent wrote itself.`);\nlines.push(names.length\n  ? `- Tool calls this turn (${names.length}): ${names.join(', ')}. Count of each: ` +\n    Object.entries(counts).map(([n, c]) => `${n} ${c}`).join(', ') + '.'\n  : '- Tool calls this turn: none.');\n\nconst validates = steps.filter((s) => name(s) === 'scenario_document_validate');\nif (!validates.length) {\n  if (session.latest?.errors !== 0) lines.push('- No validate call this turn.');\n} else {\n  lines.push(`- Validate calls this turn (${validates.length}), in order:`);\n  validates.forEach((s, i) => {\n    const document = s.action.toolInput.document;\n    const hash = sha256(document).slice(0, 12);\n    const r = result(s);\n    const errors = r?.data?.errors ?? null;\n    const warnings = r?.data?.warnings ?? null;\n    lines.push(`  - #${i + 1} ${hash} | ${errors ?? 'unknown'} errors | ${warnings ?? 'unknown'} warnings`);\n    session.history.push({ hash, turn: session.turns, errors, warnings });\n    session.latest = { hash, turn: session.turns, errors, warnings, document };\n    if (emptyReply) session.latest.unshown = true;\n  });\n  const validate = validates[validates.length - 1];\n  const r = result(validate);\n  if (!r?.data?.findings) {\n    lines.push(`- Last validate this turn: no readable result. Raw: ${String(validate.observation).slice(0, 300)}`);\n  } else {\n    lines.push(`- Last validate this turn: ${r.data.errors} errors, ${r.data.warnings} warnings, ` +\n      `${r.data.findings.length} findings:`);\n    for (const f of r.data.findings) lines.push(`  - ${f.code} | ${f.severity} | ${f.path} | ${f.message}`);\n  }\n}\n\nconst imp = steps.filter((s) => name(s) === 'scenario_document_import').pop();\nif (imp) {\n  const r = result(imp);\n  const lossy = (r?.data?.findings ?? []).filter((f) => f.code === 'STORAGE_LOSSY').length;\n  lines.push(r\n    ? `- Import this turn: HTTP ${r.status}, scenario id ${r.data?.id ?? 'none'}, ${lossy} STORAGE_LOSSY findings.`\n    : `- Import this turn: no readable result. Raw: ${String(imp.observation).slice(0, 300)}`);\n}\n\nconst latest = session.latest;\nlet importHash = null;\nif (latest?.imported) {\n  lines.push(`- Document ${latest.hash} was imported as scenario ${latest.imported.scenarioId} on turn ${latest.imported.turn}.`);\n} else if (latest?.unshown && latest.errors === 0) {\n  lines.push(`- Document ${latest.hash} was validated on turn ${latest.turn}, but the agent's reply on that turn was empty, ` +\n    'so its plan was never shown. It cannot be imported. Send your message again.');\n} else if (latest?.errors === 0) {\n  importHash = latest.hash;\n  if (!validates.length) lines.push(`- No validate this turn. The import line is for the document validated on turn ${latest.turn}.`);\n  lines.push(`- To import this document, send: import ${latest.hash} (validated on turn ${latest.turn})`);\n}\n\nconst gateReport = lines.join('\\n');\n// The page's short view of this reply: the agent's text, one status line, the hash for the Import button\n// (only when the import line above is shown) with that document's bytes, and the full report.\nlet status = !validates.length\n  ? (latest ? `No new validation this turn. The latest document was validated on turn ${latest.turn}.` : 'No document validated yet.')\n  : latest.errors === 0 ? `Validated: no errors, ${latest.warnings} warnings.` : `Not valid yet: ${latest.errors ?? 'unknown'} errors.`;\nif (latest?.unshown && latest.errors === 0 && !latest.imported) {\n  status += ' Its plan was never shown, so it cannot be imported. Send your message again.';\n}\n// The warnings of the turn's last validate the developer must act on, one entry per code. STORAGE_LOSSY needs\n// no action; infos are not listed.\nconst lastFindings = (validates.length ? result(validates[validates.length - 1])?.data?.findings : null) ?? [];\n// DRYRUN_NPCS on /population/pools itself means the document declares no pools at all.\nconst noPools = lastFindings.some((f) => f.code === 'DRYRUN_NPCS' && f.path === '/population/pools');\nconst attentionLines = {\n  REF_UNSET_FLAG: (n) => n === 1\n    ? '1 condition reads a flag that nothing in the document sets. Check that it is a flag the white cell raises ' +\n      'during play, not a typo.'\n    : `${n} conditions read a flag that nothing in the document sets. Check that each one is a flag the white ` +\n      'cell raises during play, not a typo.',\n  FLAG_NEVER_READ: (n) => n === 1\n    ? '1 flag is set but never read. Add the condition that should read it, or remove the flag.'\n    : `${n} flags are set but never read. Add the condition that should read each one, or remove the flag.`,\n  DRYRUN_NPCS: (n) => noPools\n    ? 'The document declares no population pools, so the exercise has no one to animate. Add a pool.'\n    : n === 1\n      ? '1 population pool generates nobody. Give it a count, or remove it.'\n      : `${n} population pools generate nobody. Give each one a count, or remove it.`,\n  WORKFLOW_NOT_REGISTERED: (n) => n === 1\n    ? \"1 entry in the document's workflow list names an n8n workflow that is not registered. Register the \" +\n      'workflow, or correct the name.'\n    : `${n} entries in the document's workflow list name an n8n workflow that is not registered. Register ` +\n      'each workflow, or correct the name.',\n  ATTACK_DEPRECATED_TECHNIQUE: (n) => n === 1\n    ? 'The document uses a deprecated ATT&CK technique in 1 place. Replace it with its current technique.'\n    : `The document uses deprecated ATT&CK techniques in ${n} places. Replace each one with its current technique.`,\n  REF_UNKNOWN_HOST: (n) => n === 1\n    ? '1 host name in an event description is not a host the document defines. Add the host, or correct the name.'\n    : `${n} host names in event descriptions are not hosts the document defines. Add each host, or correct the name.`,\n};\nconst warningCounts = {};\nfor (const f of lastFindings) {\n  if (f.severity === 'warning' && f.code !== 'STORAGE_LOSSY') warningCounts[f.code] = (warningCounts[f.code] ?? 0) + 1;\n}\nconst attention = Object.entries(warningCounts)\n  .map(([code, count]) => ({ code, count, line: attentionLines[code]?.(count) ?? `${count} × ${code}: see Details.` }));\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nconst view = { reply, status, importHash, document: importHash ? latest.document : null, report: gateReport, model, attention };\n// The memory's copy of the report: after a validate it also holds the latest validated document, so the\n// agent keeps it without pasting it into a reply.\nconst memoryReport = validates.length\n  ? `${gateReport}\\n\\nWorkflow's copy of the latest validated document, ${latest.hash} (turn ${latest.turn}), exactly as validated:\\n${latest.document}`\n  : gateReport;\nreturn [{ json: { output: `${reply}\\n\\n---\\n${gateReport}`, gateReport, memoryReport, view } }];\n"
+      }
+    },
+    {
+      "id": "fc4fd7a5-d9ab-42ba-80c4-f021ad36e4fa",
+      "name": "Insert gate report into memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryManager",
+      "typeVersion": 1.1,
+      "position": [
+        2528,
+        480
+      ],
+      "parameters": {
+        "mode": "insert",
+        "insertMode": "insert",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "ai",
+              "message": "={{ \"\\n\\n---\\n\" + $json.memoryReport }}",
+              "hideFromUI": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0f876112-2d98-478c-91fe-f327918e5e75",
+      "name": "Gate Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        2528,
+        700
+      ],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('When chat message received').first().json.sessionId }}",
+        "contextWindowLength": 30
+      }
+    },
+    {
+      "id": "085e7407-9e55-4aac-9e72-9723ad3bc76d",
+      "name": "Reply with gate report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2768,
+        480
+      ],
+      "parameters": {
+        "jsCode": "// The memory manager outputs only {success: true}; return the Gate report node's output,\n// so the chat shows the reply plus the block.\nreturn $('Gate report').all();"
+      }
+    },
+    {
+      "id": "26a8f8c5-798a-4dd5-8d71-47593f314ed4",
+      "name": "Import command?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        -112
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e391848d-bad1-4aa4-8174-237699d2d6e2",
+              "leftValue": "={{ /^import ([0-9a-f]{12})$/i.test($json.chatInput.trim()) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "38b73754-9c16-4761-947d-1843abcdb2c2",
+      "name": "Import check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        -312
+      ],
+      "parameters": {
+        "jsCode": "// Import path, step 1. \"import <hash>\" is honoured only for the session's latest validated document,\n// and only when that document had 0 errors. Nothing on this path calls the model.\nconst chat = $('When chat message received').first().json;\nconst hash = chat.chatInput.trim().match(/^import ([0-9a-f]{12})$/i)[1].toLowerCase();\nconst sd = $getWorkflowStaticData('global');\nsd.sessions ??= {};\nconst session = (sd.sessions[chat.sessionId] ??= { turns: 0, history: [] });\nsession.turns += 1;\n\nconst latest = session.latest;\nlet refusal = null;\nif (!latest) refusal = 'Nothing has been validated in this session.';\nelse if (hash !== latest.hash) refusal = `${hash} is not the latest validated document. The latest is ${latest.hash}, from turn ${latest.turn}.`;\nelse if (latest.imported) refusal = `${hash} was already imported as scenario ${latest.imported.scenarioId} on turn ${latest.imported.turn}. To import it again, ask the agent to validate it again.`;\nelse if (latest.errors !== 0) refusal = `${hash} did not pass validation (${latest.errors ?? 'unknown'} errors).`;\nelse if (latest.unshown) refusal = `${hash} was validated on turn ${latest.turn}, but the agent's reply on that turn was empty, ` +\n  'so its plan was never shown. Send your message again, and import from the next report.';\n\nreturn [{ json: refusal\n  ? { proceed: false, output: `Import report (from the workflow, not the agent)\\n- ${refusal} Nothing was imported.` }\n  : { proceed: true, hash, document: latest.document } }];\n"
+      }
+    },
+    {
+      "id": "4c6b680c-d9a7-4093-b6c9-49a852a4ce76",
+      "name": "Stored document passes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        -312
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3d0e134a-64c5-4d7f-ad6d-1764e2f0c838",
+              "leftValue": "={{ $json.proceed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d83f4f68-c1c2-42a1-b828-0e1a313ec96c",
+      "name": "Reply with refusal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -112
+      ],
+      "parameters": {
+        "jsCode": "// The refusal Import check wrote; nothing was validated or imported. The memory manager outputs only\n// {success: true}, so the reply is read from Import check.\nconst { output } = $('Import check').first().json;\nconst reason = output.split('\\n- ')[1];\nconst status = `Not imported: ${reason.slice(0, reason.indexOf('. ') + 1)}`;\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nreturn [{ json: { output, view: { reply: '', status, importHash: null, report: output, model } } }];"
+      }
+    },
+    {
+      "id": "7b54e716-bf61-4eaa-88f8-5c82f2abc735",
+      "name": "MCP initialize",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        -312
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://mcp:5055/mcp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: \"2.0\", id: 1, method: \"initialize\", params: { protocolVersion: \"2025-03-26\", capabilities: {}, clientInfo: { name: \"n8n-workflow-import\", version: \"1\" } } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ea837221-eed6-4376-ab75-a64f06f77090",
+      "name": "MCP initialized",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -312
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://mcp:5055/mcp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            },
+            {
+              "name": "Mcp-Session-Id",
+              "value": "={{ $('MCP initialize').first().json.headers['mcp-session-id'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: \"2.0\", method: \"notifications/initialized\" }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "48e32b90-7e47-4217-b85c-177c4377b8fd",
+      "name": "MCP validate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1920,
+        -312
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://mcp:5055/mcp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            },
+            {
+              "name": "Mcp-Session-Id",
+              "value": "={{ $('MCP initialize').first().json.headers['mcp-session-id'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: \"2.0\", id: 2, method: \"tools/call\", params: { name: \"scenario_document_validate\", arguments: { document: $('Import check').first().json.document, dryRun: true } } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "3703179e-d3b3-44b1-8d8a-9e8a16903461",
+      "name": "Revalidate check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        -312
+      ],
+      "parameters": {
+        "jsCode": "// Import path, step 2: the stored document, validated again over MCP. Import only if it still has 0 errors.\nconst message = (res, id) => String(res.data).split('\\n').filter((l) => l.startsWith('data: '))\n  .map((l) => JSON.parse(l.slice(6))).find((m) => m.id === id);\nconst r = JSON.parse(message($input.first().json, 2).result.content.find((c) => c.type === 'text').text);\nreturn [{ json: { clean: r.data.errors === 0, errors: r.data.errors, warnings: r.data.warnings, findings: r.data.findings.length } }];\n"
+      }
+    },
+    {
+      "id": "70c7759a-9b07-4fae-a33a-875b8379eb63",
+      "name": "Still 0 errors?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2400,
+        -312
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4ce1248b-513f-4d3b-893e-f1b7e634dcda",
+              "leftValue": "={{ $json.clean }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "6d797882-bf58-41d9-8f0c-f2ea9de261f4",
+      "name": "MCP import",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        -412
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://mcp:5055/mcp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json, text/event-stream"
+            },
+            {
+              "name": "Mcp-Session-Id",
+              "value": "={{ $('MCP initialize').first().json.headers['mcp-session-id'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: \"2.0\", id: 3, method: \"tools/call\", params: { name: \"scenario_document_import\", arguments: { document: $('Import check').first().json.document } } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "f254453c-2763-435b-8e90-25ebfc369f47",
+      "name": "Import report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        -312
+      ],
+      "parameters": {
+        "jsCode": "// Import path, step 3: the workflow's report of what it validated and imported, from the MCP results.\nconst message = (res, id) => String(res.data).split('\\n').filter((l) => l.startsWith('data: '))\n  .map((l) => JSON.parse(l.slice(6))).find((m) => m.id === id);\nconst { hash } = $('Import check').first().json;\nconst v = $('Revalidate check').first().json;\nconst lines = ['Import report (from the workflow, not the agent)',\n  `- Validated again: document ${hash}, ${v.errors} errors, ${v.warnings} warnings, ${v.findings} findings.`];\nlet status;\nlet scenarioId = null;\nif (!$('MCP import').isExecuted) {\n  status = `Not imported: document ${hash} no longer passes validation.`;\n  lines.push(`- Not imported: document ${hash} no longer passes validation.`);\n} else {\n  const r = JSON.parse(message($('MCP import').first().json, 3).result.content.find((c) => c.type === 'text').text);\n  const lossy = (r.data?.findings ?? []).filter((f) => f.code === 'STORAGE_LOSSY').length;\n  if (r.data?.id != null) {\n    const session = $getWorkflowStaticData('global').sessions[$('When chat message received').first().json.sessionId];\n    session.latest.imported = { scenarioId: r.data.id, turn: session.turns };\n    scenarioId = r.data.id;\n  }\n  status = scenarioId != null ? `Imported as scenario ${scenarioId}.` : `Not imported: the import returned HTTP ${r.status}.`;\n  lines.push(`- Imported: HTTP ${r.status}, scenario id ${r.data?.id ?? 'none'}, ${lossy} STORAGE_LOSSY findings, document ${hash}.`);\n}\nconst importReport = lines.join('\\n');\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nreturn [{ json: { output: importReport, importReport, view: { reply: '', status, importHash: null, scenarioId, report: importReport, model } } }];\n"
+      }
+    },
+    {
+      "id": "2bfd4f9a-a498-4444-8b8e-68b14096dd08",
+      "name": "Insert import report into memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryManager",
+      "typeVersion": 1.1,
+      "position": [
+        3120,
+        -312
+      ],
+      "parameters": {
+        "mode": "insert",
+        "insertMode": "insert",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "ai",
+              "message": "={{ \"\\n\\n---\\n\" + $json.importReport }}",
+              "hideFromUI": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "336001f7-2f78-440a-a155-d1f1c3818a49",
+      "name": "Import Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        3120,
+        -92
+      ],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('When chat message received').first().json.sessionId }}",
+        "contextWindowLength": 30
+      }
+    },
+    {
+      "id": "ddd9f16e-128c-4b21-89aa-816216d275e9",
+      "name": "Reply with import report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        -312
+      ],
+      "parameters": {
+        "jsCode": "// The memory manager outputs only {success: true}; return the Import report node's output,\n// so the chat shows the report.\nreturn $('Import report').all();"
+      }
+    },
+    {
+      "id": "1965f91c-265c-4987-85b6-65683e7afc61",
+      "name": "Insert refusal into memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryManager",
+      "typeVersion": 1.1,
+      "position": [
+        3120,
+        48
+      ],
+      "parameters": {
+        "mode": "insert",
+        "insertMode": "insert",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "ai",
+              "message": "={{ \"\\n\\n---\\n\" + $json.output }}",
+              "hideFromUI": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "6973c527-c790-49cb-9ec8-97e730b9a08f",
+      "name": "Refusal Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        3120,
+        268
+      ],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('When chat message received').first().json.sessionId }}",
+        "contextWindowLength": 30
+      }
+    },
+    {
+      "id": "d61847ed-03c6-4a33-956c-bd9a02dd4c68",
+      "name": "Empty agent reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2288,
+        480
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6a5c8c67-6494-4124-adef-a10a8032d8f6",
+              "leftValue": "={{ String($('Scenario Authoring Agent').first().json.output ?? '').trim() }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "04fb37c4-5df9-47c2-a234-b36e72f91ed7",
+      "name": "Delete empty turn from memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryManager",
+      "typeVersion": 1.1,
+      "position": [
+        2528,
+        920
+      ],
+      "parameters": {
+        "mode": "delete",
+        "deleteMode": "lastN",
+        "lastMessagesCount": 2
+      }
+    },
+    {
+      "id": "110ee7e4-8741-4e35-8f45-e30fad4655ed",
+      "name": "Empty Turn Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        2528,
+        1140
+      ],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('When chat message received').first().json.sessionId }}",
+        "contextWindowLength": 30
+      }
+    },
+    {
+      "id": "89b0e884-8736-4929-86ac-b752c2ac7400",
+      "name": "Reply with empty-reply notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2768,
+        920
+      ],
+      "parameters": {
+        "jsCode": "// The agent saved the human message and an empty reply; the node before deleted both, so the next\n// turn does not send Bedrock an empty message. The gate report is not inserted into memory here.\nconst { gateReport, view } = $('Gate report').first().json;\nconst notice = 'The model returned an empty reply, so this turn was not saved. Send your message again.';\nconst latest = $getWorkflowStaticData('global').sessions[$('When chat message received').first().json.sessionId].latest;\nconst status = latest?.unshown && latest.errors === 0 && !latest.imported\n  ? 'The model returned an empty reply, so this turn was not saved and its plan cannot be imported. Send your message again.' : notice;\nreturn [{ json: { output: `${notice}\\n\\n---\\n${gateReport}`, view: { ...view, reply: '', status } } }];"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// The agent node failed (after its one retry) and sent the error here. The agent saves a turn to memory\n// only when it succeeds, so nothing of this turn was kept. n8n passes on Bedrock's message but not the\n// exception name; step 11i's replays got this message only as ServiceUnavailableException (HTTP 503).\nconst message = String($input.first().json.error ?? '');\nconst exception = message === 'Bedrock is unable to process your request.' ? 'ServiceUnavailableException (HTTP 503)' : null;\nconst report = `Bedrock's message: ${message}` +\n  (exception ? `\\nException: ${exception}, from the message; n8n does not pass the name on.` : '');\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nreturn [{ json: { output: `This turn failed, so there is no reply.\\n\\n---\\n${report}`,\n  view: { reply: '', status: 'failed', importHash: null, report, model, error: message, exception } } }];"
+      },
+      "id": "5d0c6a1e-7f3b-4c2a-9e8d-1b4f6a2c9e11",
+      "name": "Reply with failure notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        260
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Import command?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AWS Bedrock Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Scenario Authoring Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Scenario Authoring Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "When chat message received",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client": {
+      "ai_tool": [
+        [
+          {
+            "node": "Scenario Authoring Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scenario Authoring Agent": {
+      "main": [
+        [
+          {
+            "node": "Gate report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply with failure notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate report": {
+      "main": [
+        [
+          {
+            "node": "Empty agent reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Insert gate report into memory",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert gate report into memory": {
+      "main": [
+        [
+          {
+            "node": "Reply with gate report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Import command?": {
+      "main": [
+        [
+          {
+            "node": "Import check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Scenario Authoring Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Import check": {
+      "main": [
+        [
+          {
+            "node": "Stored document passes?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stored document passes?": {
+      "main": [
+        [
+          {
+            "node": "MCP initialize",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Insert refusal into memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP initialize": {
+      "main": [
+        [
+          {
+            "node": "MCP initialized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP initialized": {
+      "main": [
+        [
+          {
+            "node": "MCP validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP validate": {
+      "main": [
+        [
+          {
+            "node": "Revalidate check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revalidate check": {
+      "main": [
+        [
+          {
+            "node": "Still 0 errors?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still 0 errors?": {
+      "main": [
+        [
+          {
+            "node": "MCP import",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Import report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP import": {
+      "main": [
+        [
+          {
+            "node": "Import report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Import report": {
+      "main": [
+        [
+          {
+            "node": "Insert import report into memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Import Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Insert import report into memory",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert import report into memory": {
+      "main": [
+        [
+          {
+            "node": "Reply with import report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert refusal into memory": {
+      "main": [
+        [
+          {
+            "node": "Reply with refusal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refusal Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Insert refusal into memory",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Empty agent reply?": {
+      "main": [
+        [
+          {
+            "node": "Delete empty turn from memory",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Insert gate report into memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete empty turn from memory": {
+      "main": [
+        [
+          {
+            "node": "Reply with empty-reply notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Empty Turn Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Delete empty turn from memory",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "id": "GhScenAuthor0004",
+  "tags": []
+}

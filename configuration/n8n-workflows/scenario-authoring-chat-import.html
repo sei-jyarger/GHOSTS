@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>GHOSTS Scenario Authoring</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <style>
+        /* Mattermost's default light theme, Denim. Secondary text is the text color at 75%, not Mattermost's
+           64%, which is 3.6:1 on white; 75% is 4.8:1. */
+        :root {
+            --header-bg: #1e325c;
+            --header-text: #ffffff;
+            --header-secondary: rgba(255, 255, 255, 0.64);
+            --bg: #ffffff;
+            --text: #3f4350;
+            --border: rgba(63, 67, 80, 0.16);
+            --secondary: rgba(63, 67, 80, 0.75);
+            --link: #386fe5;
+            --button-bg: #1c58d9;
+            --button-text: #ffffff;
+            --error: #d24b4e;
+            --status-bg: rgba(28, 88, 217, 0.08);
+            --attention-bg: rgba(210, 75, 78, 0.08);
+            --code-bg: rgba(63, 67, 80, 0.08);
+        }
+
+        html, body {
+            margin: 0;
+            font-family: "Open Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 15px;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        header {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.6rem 1.25rem;
+            background: var(--header-bg);
+            color: var(--header-text);
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        header #model {
+            flex: 1;
+            color: var(--header-secondary);
+            font-size: 0.85rem;
+        }
+
+        main {
+            flex: 1;
+            padding: 1rem 1.25rem;
+        }
+
+        .post {
+            display: flex;
+            gap: 0.75rem;
+            max-width: 52rem;
+            padding: 0.5rem 0;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+
+        .avatar {
+            flex: none;
+            width: 2.25rem;
+            height: 2.25rem;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--button-text);
+            background: var(--text);
+        }
+
+        .post.bot .avatar { background: var(--button-bg); }
+
+        .body {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .head {
+            display: flex;
+            align-items: baseline;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+        }
+
+        .head .tag {
+            padding: 0 0.3rem;
+            border-radius: 2px;
+            background: var(--code-bg);
+            font-size: 0.65rem;
+            font-weight: 600;
+        }
+
+        .head time, .head .model {
+            color: var(--secondary);
+            font-size: 0.8rem;
+        }
+
+        /* The developer's posts sit on the right: avatar, head line and a block of text at most three quarters
+           of the column wide. The text inside the block stays left-aligned. */
+        .post.user { flex-direction: row-reverse; }
+        .post.user .body { display: flex; flex-direction: column; align-items: flex-end; }
+        .post.user .head { justify-content: flex-end; }
+
+        .post.user .text {
+            max-width: 75%;
+            margin-top: 0.25rem;
+            padding: 0.4rem 0.6rem;
+            border-radius: 4px;
+            background: var(--status-bg);
+            white-space: pre-wrap;
+        }
+
+        .md > :first-child { margin-top: 0; }
+        .md > :last-child { margin-bottom: 0; }
+        .md pre, .md code { background: var(--code-bg); border-radius: 3px; }
+        .md pre { padding: 0.5rem; overflow-x: auto; }
+        .md table { border-collapse: collapse; }
+        .md th, .md td { border: 1px solid var(--border); padding: 0.2rem 0.5rem; }
+        a { color: var(--link); }
+
+        /* Written by the page from the workflow's view, never from the agent's text. */
+        .status, .attention {
+            margin-top: 0.75rem;
+            padding: 0.4rem 0.6rem;
+            border-left: 3px solid var(--button-bg);
+            background: var(--status-bg);
+            font-size: 0.9rem;
+        }
+
+        /* #386fe5 is 4.1:1 on this tint; the button blue is 5.4:1. */
+        .status a { color: var(--button-bg); }
+
+        .attention {
+            margin-top: 0.5rem;
+            border-left-color: var(--error);
+            background: var(--attention-bg);
+        }
+
+        button {
+            padding: 0.4rem 0.9rem;
+            border: 0;
+            border-radius: 4px;
+            background: var(--button-bg);
+            color: var(--button-text);
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            background: var(--code-bg);
+            color: var(--text);
+            cursor: default;
+        }
+
+        .import { margin-top: 0.5rem; }
+
+        details {
+            margin-top: 0.5rem;
+            font-size: 0.85rem;
+            color: var(--secondary);
+        }
+
+        details pre {
+            white-space: pre-wrap;
+            margin: 0.5rem 0 0;
+        }
+
+        details a {
+            display: inline-block;
+            margin-top: 0.5rem;
+        }
+
+        .waiting {
+            max-width: 52rem;
+            padding: 0.5rem 0 0.5rem 3rem;
+            color: var(--secondary);
+            font-style: italic;
+        }
+
+        form {
+            position: sticky;
+            bottom: 0;
+            background: var(--bg);
+            display: flex;
+            gap: 0.5rem;
+            padding: 0.75rem 1.25rem;
+            border-top: 1px solid var(--border);
+        }
+
+        textarea {
+            flex: 1;
+            min-height: 3rem;
+            max-height: 40vh;
+            resize: vertical;
+            padding: 0.5rem;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font: inherit;
+        }
+
+        textarea::placeholder { color: var(--secondary); }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>GHOSTS Scenario Authoring</h1>
+        <span id="model"></span>
+        <button type="button" id="new">New conversation</button>
+    </header>
+
+    <main id="log"></main>
+
+    <form id="send">
+        <textarea id="text" placeholder="Message the Scenario Authoring Agent"></textarea>
+        <button type="submit">Send</button>
+    </form>
+
+    <script type="module">
+        // A small chat client for the chat trigger, in place of the @n8n/chat widget, which renders a reply only
+        // as one markdown string. The agent's text is rendered as markdown with raw HTML off; the status line,
+        // the attention list, the Import button and the report come from the workflow's "view" and are written
+        // as text.
+        import markdownit from "https://cdn.jsdelivr.net/npm/markdown-it@15.0.2/+esm";
+
+        // The n8n host and the GHOSTS UI come off the querystring, because this page is static and cannot be
+        // templated. Their default ports are the fallbacks.
+        const params = new URLSearchParams(location.search);
+        const n8nUrl = (params.get("n8n") || "http://localhost:5678").replace(/\/+$/, "");
+        const uiUrl = (params.get("ui") || "http://localhost:4200").replace(/\/+$/, "");
+        const webhookUrl = `${n8nUrl}/webhook/ghosts-scenario-authoring-import/chat`;
+
+        const md = markdownit({ html: false });
+        const defaultLink = md.renderer.rules.link_open ?? ((t, i, o, e, s) => s.renderToken(t, i, o));
+        md.renderer.rules.link_open = (tokens, i, options, env, self) => {
+            tokens[i].attrSet("target", "_blank");
+            tokens[i].attrSet("rel", "noopener noreferrer");
+            return defaultLink(tokens, i, options, env, self);
+        };
+
+        // One session per browser, as the widget kept it, so a reload continues the conversation. A new
+        // session has no history to load.
+        const key = "ghosts-scenario-authoring-import/sessionId";
+        let sessionId = localStorage.getItem(key);
+        const resumed = !!sessionId;
+        if (!resumed) localStorage.setItem(key, sessionId = crypto.randomUUID());
+        // The model named by the latest view, for the header after a reload.
+        const modelKey = "ghosts-scenario-authoring-import/model";
+
+        const log = document.getElementById("log");
+        const form = document.getElementById("send");
+        const input = document.getElementById("text");
+        const modelLine = document.getElementById("model");
+        let busy = false;
+
+        const el = (tag, className, text) => {
+            const e = document.createElement(tag);
+            if (className) e.className = className;
+            if (text !== undefined) e.textContent = text;
+            return e;
+        };
+        const add = (node) => { log.append(node); window.scrollTo(0, document.body.scrollHeight); return node; };
+        const modelLabel = (model) => `${model.name}${model.source === "configured" ? " (configured model)" : ""}`;
+        const showModel = (model, lastReply) => {
+            modelLine.textContent = model ? `${modelLabel(model)}${lastReply ? ", last reply" : ""}` : "no reply yet";
+        };
+        // A post: avatar, name, time, and for the agent the model; the body is returned for the content. A
+        // post from memory has no time, and shows none.
+        const post = (bot, at, model) => {
+            const p = el("div", bot ? "post bot" : "post user");
+            const body = el("div", "body");
+            const head = el("div", "head");
+            head.append(el("strong", null, bot ? "Scenario Authoring Agent" : "You"));
+            if (bot) head.append(el("span", "tag", "BOT"));
+            if (at) {
+                const t = el("time", null, at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+                t.dateTime = at.toISOString();
+                head.append(t);
+            }
+            if (model) head.append(el("span", "model", model));
+            body.append(head);
+            p.append(el("div", "avatar", bot ? "SA" : "You"), body);
+            add(p);
+            return body;
+        };
+        const userPost = (text, at) => post(false, at).append(el("div", "text", text));
+        const details = (report) => {
+            const d = el("details");
+            d.append(el("summary", null, "Details"), el("pre", null, report));
+            return d;
+        };
+        // The document the Import button would import, as the exact bytes it was validated as, shown as text
+        // and offered as a download.
+        const documentToggle = (text, hash) => {
+            let slug = "scenario";
+            try { slug = JSON.parse(text).slug || slug; } catch { }
+            const d = el("details", "document");
+            const a = el("a", null, `Download ${slug}-${hash}.json`);
+            a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+            a.download = `${slug}-${hash}.json`;
+            d.append(el("summary", null, "Document"), a, el("pre", null, text));
+            return d;
+        };
+
+        // The page's own first post. It is never sent to the webhook and never stored, so no model wrote it.
+        const greeting = "Paste your exercise intent: a paragraph on who trains, what they face, and what they must decide. " +
+            "I'll ask about anything the intent leaves open, draft the scenario, validate it, and show you the plan and " +
+            "every decision I made. Nothing is imported until you press Import this scenario.";
+        const greet = () => post(true, new Date(), null).append(el("div", "md", greeting));
+
+        // A failed turn: the workflow's view says "failed", or the webhook answered with no view.
+        const failedStatus = "This turn failed, so there is no reply. Your message was not kept. Send it again.";
+
+        function showReply(view) {
+            // Every older Import button is disabled once a newer reply has arrived.
+            for (const b of log.querySelectorAll("button.import")) b.disabled = true;
+            if (view.model) {
+                localStorage.setItem(modelKey, JSON.stringify(view.model));
+                showModel(view.model, false);
+            }
+            const m = post(true, new Date(), view.model ? modelLabel(view.model) : null);
+            if (view.reply) {
+                const text = el("div", "md");
+                text.innerHTML = md.render(view.reply);
+                m.append(text);
+            }
+            const status = el("div", "status", view.status === "failed" ? failedStatus : view.status);
+            if (view.scenarioId != null) {
+                const a = el("a", null, `Open scenario ${view.scenarioId}`);
+                a.href = `${uiUrl}/scenarios/${view.scenarioId}`;
+                a.target = "_blank";
+                a.rel = "noopener noreferrer";
+                status.append(" ", a);
+            }
+            m.append(status);
+            if (view.attention?.length) {
+                const list = el("div", "attention");
+                for (const a of view.attention) list.append(el("div", null, a.line));
+                m.append(list);
+            }
+            if (view.importHash) {
+                const b = el("button", "import", "Import this scenario");
+                b.onclick = () => { if (!busy && !b.disabled) { b.disabled = true; send(`import ${view.importHash}`); } };
+                m.append(b);
+                if (view.document) m.append(documentToggle(view.document, view.importHash));
+            }
+            m.append(details(view.report));
+            window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        async function send(text) {
+            busy = true;
+            form.querySelector("button").disabled = true;
+            userPost(text, new Date());
+            const waiting = add(el("div", "waiting", "Working… 0 s"));
+            const started = Date.now();
+            const tick = setInterval(() => { waiting.textContent = `Working… ${Math.floor((Date.now() - started) / 1000)} s`; }, 1000);
+            let view;
+            try {
+                const res = await fetch(webhookUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ action: "sendMessage", sessionId, chatInput: text }),
+                });
+                const body = await res.text();
+                let json = null;
+                try { json = JSON.parse(body); } catch { }
+                view = res.ok && json?.view ? json.view
+                    : { reply: "", status: "failed", importHash: null, report: `HTTP ${res.status}\n${body}` };
+            } catch (e) {
+                view = { reply: "", status: "failed", importHash: null, report: String(e) };
+            }
+            clearInterval(tick);
+            waiting.remove();
+            showReply(view);
+            busy = false;
+            form.querySelector("button").disabled = false;
+        }
+
+        // A reload shows the conversation from the workflow's memory: the developer's messages, the agent's
+        // replies as markdown, and each gate, import or refusal report the workflow inserted, collapsed under
+        // Details. Memory holds no view, so there is no status line and no Import button for these. The
+        // workflow's copy of the document that memory holds after a gate report is left out of Details.
+        const inserted = /^\n\n---\n(Gate report \(from the tool calls, not the agent\)|Import report \(from the workflow, not the agent\))/;
+        const copy = /\n\nWorkflow's copy of the latest validated document, [0-9a-f]{12} \(turn \d+\), exactly as validated:\n[\s\S]*$/;
+        async function loadPrevious() {
+            const res = await fetch(webhookUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "loadPreviousSession", sessionId }),
+            });
+            const { data = [] } = await res.json();
+            let last = null;
+            for (const m of data) {
+                const content = String(m.kwargs?.content ?? "");
+                if (m.id.includes("HumanMessage")) { last = null; userPost(content, null); continue; }
+                if (inserted.test(content)) {
+                    (last ?? (last = post(true, null, null))).append(details(content.replace(/^\n\n---\n/, "").replace(copy, "")));
+                    continue;
+                }
+                last = post(true, null, null);
+                const text = el("div", "md");
+                text.innerHTML = md.render(content);
+                last.append(text);
+            }
+        }
+
+        form.addEventListener("submit", (e) => {
+            e.preventDefault();
+            const text = input.value.trim();
+            if (!text || busy) return;
+            input.value = "";
+            send(text);
+        });
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+        });
+        // A new session id, an empty log and the greeting; the old session stays in the workflow's memory.
+        document.getElementById("new").addEventListener("click", () => {
+            if (busy) return;
+            localStorage.setItem(key, sessionId = crypto.randomUUID());
+            localStorage.removeItem(modelKey);
+            log.replaceChildren();
+            showModel(null);
+            greet();
+        });
+
+        const stored = localStorage.getItem(modelKey);
+        showModel(stored ? JSON.parse(stored) : null, true);
+        greet();
+        if (resumed) loadPrevious().catch((e) => console.error("loadPreviousSession", e));
+    </script>
+</body>
+
+</html>
