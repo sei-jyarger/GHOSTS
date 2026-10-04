@@ -142,7 +142,7 @@
         480
       ],
       "parameters": {
-        "jsCode": "// Gate report: built from the agent's intermediate steps (each tool call and what it returned),\n// never from the model's text. Appended to the reply in the field the agent used (output).\n// Every validated document is hashed and kept in static data, so \"import <hash>\" imports those bytes.\n// SHA-256 of a string's UTF-8 bytes, in plain JavaScript (the Code node may not require('crypto')).\nconst sha256 = (str) => {\n  const bytes = [];\n  for (const ch of str) {\n    let c = ch.codePointAt(0);\n    if (c < 0x80) bytes.push(c);\n    else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63));\n    else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n    else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n  }\n  const K = [];\n  const H = [];\n  for (let n = 2, found = 0; found < 64; n++) {\n    let prime = true;\n    for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }\n    if (!prime) continue;\n    if (found < 8) H.push((Math.pow(n, 1 / 2) % 1) * 2 ** 32 | 0);\n    K.push((Math.pow(n, 1 / 3) % 1) * 2 ** 32 | 0);\n    found++;\n  }\n  const bitLen = bytes.length * 8;\n  bytes.push(0x80);\n  while (bytes.length % 64 !== 56) bytes.push(0);\n  for (let i = 7; i >= 0; i--) bytes.push(i > 3 ? Math.floor(bitLen / 2 ** (8 * i)) & 255 : (bitLen >>> (8 * i)) & 255);\n  const rotr = (x, n) => (x >>> n) | (x << (32 - n));\n  const w = new Array(64);\n  for (let off = 0; off < bytes.length; off += 64) {\n    for (let i = 0; i < 16; i++) {\n      w[i] = (bytes[off + 4 * i] << 24) | (bytes[off + 4 * i + 1] << 16) | (bytes[off + 4 * i + 2] << 8) | bytes[off + 4 * i + 3];\n    }\n    for (let i = 16; i < 64; i++) {\n      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);\n      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);\n      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;\n    }\n    let [a, b, c, d, e, f, g, h] = H;\n    for (let i = 0; i < 64; i++) {\n      const t1 = (h + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;\n      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;\n      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;\n    }\n    [a, b, c, d, e, f, g, h].forEach((v, i) => { H[i] = (H[i] + v) | 0; });\n  }\n  return H.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');\n};\n\nconst agent = $input.first().json;\nconst steps = agent.intermediateSteps ?? [];\n// The same test as the \"Empty agent reply?\" node: a document validated on such a turn was never shown.\nconst emptyReply = String(agent.output ?? '').trim() === '';\nconst name = (s) => String(s.action?.tool ?? '').replace(/^MCP_Client_/, '');\nconst result = (s) => {\n  try {\n    return JSON.parse(JSON.parse(s.observation).find((c) => c.type === 'text').text);\n  } catch (e) {\n    return null;\n  }\n};\n\n// Static data, per chat session: the latest validated document with its result, and the hash and\n// counts of every validated document.\nconst sessionId = $('When chat message received').first().json.sessionId;\nconst sd = $getWorkflowStaticData('global');\nsd.sessions ??= {};\nconst session = (sd.sessions[sessionId] ??= { turns: 0, history: [] });\nsession.turns += 1;\n\n// Remove every gate report the agent wrote itself: the header line, the lines under it up to a blank\n// line, and the \"---\" line above it.\nconst kept = [];\nlet removed = 0;\nconst text = String(agent.output).split('\\n');\nfor (let i = 0; i < text.length; i++) {\n  if (!text[i].trimStart().startsWith('Gate report (from the tool calls')) { kept.push(text[i]); continue; }\n  removed++;\n  if (kept.length && kept[kept.length - 1].trim() === '---') kept.pop();\n  while (i + 1 < text.length && text[i + 1].trim() !== '') i++;\n}\nconst reply = kept.join('\\n').trimEnd();\n\nconst names = steps.map(name);\nconst counts = {};\nfor (const n of names) counts[n] = (counts[n] ?? 0) + 1;\nconst lines = ['Gate report (from the tool calls, not the agent)'];\nif (removed) lines.push(`- Removed ${removed} gate report(s) the agent wrote itself.`);\nlines.push(names.length\n  ? `- Tool calls this turn (${names.length}): ${names.join(', ')}. Count of each: ` +\n    Object.entries(counts).map(([n, c]) => `${n} ${c}`).join(', ') + '.'\n  : '- Tool calls this turn: none.');\n\nconst validates = steps.filter((s) => name(s) === 'scenario_document_validate');\nif (!validates.length) {\n  if (session.latest?.errors !== 0) lines.push('- No validate call this turn.');\n} else {\n  lines.push(`- Validate calls this turn (${validates.length}), in order:`);\n  validates.forEach((s, i) => {\n    const document = s.action.toolInput.document;\n    const hash = sha256(document).slice(0, 12);\n    const r = result(s);\n    const errors = r?.data?.errors ?? null;\n    const warnings = r?.data?.warnings ?? null;\n    lines.push(`  - #${i + 1} ${hash} | ${errors ?? 'unknown'} errors | ${warnings ?? 'unknown'} warnings`);\n    session.history.push({ hash, turn: session.turns, errors, warnings });\n    session.latest = { hash, turn: session.turns, errors, warnings, document };\n    if (emptyReply) session.latest.unshown = true;\n  });\n  const validate = validates[validates.length - 1];\n  const r = result(validate);\n  if (!r?.data?.findings) {\n    lines.push(`- Last validate this turn: no readable result. Raw: ${String(validate.observation).slice(0, 300)}`);\n  } else {\n    lines.push(`- Last validate this turn: ${r.data.errors} errors, ${r.data.warnings} warnings, ` +\n      `${r.data.findings.length} findings:`);\n    for (const f of r.data.findings) lines.push(`  - ${f.code} | ${f.severity} | ${f.path} | ${f.message}`);\n  }\n}\n\nconst imp = steps.filter((s) => name(s) === 'scenario_document_import').pop();\nif (imp) {\n  const r = result(imp);\n  const lossy = (r?.data?.findings ?? []).filter((f) => f.code === 'STORAGE_LOSSY').length;\n  lines.push(r\n    ? `- Import this turn: HTTP ${r.status}, scenario id ${r.data?.id ?? 'none'}, ${lossy} STORAGE_LOSSY findings.`\n    : `- Import this turn: no readable result. Raw: ${String(imp.observation).slice(0, 300)}`);\n}\n\nconst latest = session.latest;\nlet importHash = null;\nif (latest?.imported) {\n  lines.push(`- Document ${latest.hash} was imported as scenario ${latest.imported.scenarioId} on turn ${latest.imported.turn}.`);\n} else if (latest?.unshown && latest.errors === 0) {\n  lines.push(`- Document ${latest.hash} was validated on turn ${latest.turn}, but the agent's reply on that turn was empty, ` +\n    'so its plan was never shown. It cannot be imported. Send your message again.');\n} else if (latest?.errors === 0) {\n  importHash = latest.hash;\n  if (!validates.length) lines.push(`- No validate this turn. The import line is for the document validated on turn ${latest.turn}.`);\n  lines.push(`- To import this document, send: import ${latest.hash} (validated on turn ${latest.turn})`);\n}\n\nconst gateReport = lines.join('\\n');\n// The page's short view of this reply: the agent's text, one status line, the hash for the Import button\n// (only when the import line above is shown) with that document's bytes, and the full report.\nlet status = !validates.length\n  ? (latest ? `No new validation this turn. The latest document was validated on turn ${latest.turn}.` : 'No document validated yet.')\n  : latest.errors === 0 ? `Validated: no errors, ${latest.warnings} warnings.` : `Not valid yet: ${latest.errors ?? 'unknown'} errors.`;\nif (latest?.unshown && latest.errors === 0 && !latest.imported) {\n  status += ' Its plan was never shown, so it cannot be imported. Send your message again.';\n}\n// The warnings of the turn's last validate the developer must act on, one entry per code. STORAGE_LOSSY needs\n// no action; infos are not listed.\nconst lastFindings = (validates.length ? result(validates[validates.length - 1])?.data?.findings : null) ?? [];\n// DRYRUN_NPCS on /population/pools itself means the document declares no pools at all.\nconst noPools = lastFindings.some((f) => f.code === 'DRYRUN_NPCS' && f.path === '/population/pools');\nconst attentionLines = {\n  REF_UNSET_FLAG: (n) => n === 1\n    ? '1 condition reads a flag that nothing in the document sets. Check that it is a flag the white cell raises ' +\n      'during play, not a typo.'\n    : `${n} conditions read a flag that nothing in the document sets. Check that each one is a flag the white ` +\n      'cell raises during play, not a typo.',\n  FLAG_NEVER_READ: (n) => n === 1\n    ? '1 flag is set but never read. Add the condition that should read it, or remove the flag.'\n    : `${n} flags are set but never read. Add the condition that should read each one, or remove the flag.`,\n  DRYRUN_NPCS: (n) => noPools\n    ? 'The document declares no population pools, so the exercise has no one to animate. Add a pool.'\n    : n === 1\n      ? '1 population pool generates nobody. Give it a count, or remove it.'\n      : `${n} population pools generate nobody. Give each one a count, or remove it.`,\n  WORKFLOW_NOT_REGISTERED: (n) => n === 1\n    ? \"1 entry in the document's workflow list names an n8n workflow that is not registered. Register the \" +\n      'workflow, or correct the name.'\n    : `${n} entries in the document's workflow list name an n8n workflow that is not registered. Register ` +\n      'each workflow, or correct the name.',\n  ATTACK_DEPRECATED_TECHNIQUE: (n) => n === 1\n    ? 'The document uses a deprecated ATT&CK technique in 1 place. Replace it with its current technique.'\n    : `The document uses deprecated ATT&CK techniques in ${n} places. Replace each one with its current technique.`,\n  REF_UNKNOWN_HOST: (n) => n === 1\n    ? '1 host name in an event description is not a host the document defines. Add the host, or correct the name.'\n    : `${n} host names in event descriptions are not hosts the document defines. Add each host, or correct the name.`,\n};\nconst warningCounts = {};\nfor (const f of lastFindings) {\n  if (f.severity === 'warning' && f.code !== 'STORAGE_LOSSY') warningCounts[f.code] = (warningCounts[f.code] ?? 0) + 1;\n}\nconst attention = Object.entries(warningCounts)\n  .map(([code, count]) => ({ code, count, line: attentionLines[code]?.(count) ?? `${count} × ${code}: see Details.` }));\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nconst view = { reply, status, importHash, document: importHash ? latest.document : null, report: gateReport, model, attention };\n// The memory's copy of the report: after a validate it also holds the latest validated document, so the\n// agent keeps it without pasting it into a reply.\nconst memoryReport = validates.length\n  ? `${gateReport}\\n\\nWorkflow's copy of the latest validated document, ${latest.hash} (turn ${latest.turn}), exactly as validated:\\n${latest.document}`\n  : gateReport;\nreturn [{ json: { output: `${reply}\\n\\n---\\n${gateReport}`, gateReport, memoryReport, view } }];\n"
+        "jsCode": "// Gate report: built from the agent's intermediate steps (each tool call and what it returned),\n// never from the model's text. Appended to the reply in the field the agent used (output).\n// Every validated document is hashed and kept in static data, so \"import <hash>\" imports those bytes.\n// SHA-256 of a string's UTF-8 bytes, in plain JavaScript (the Code node may not require('crypto')).\nconst sha256 = (str) => {\n  const bytes = [];\n  for (const ch of str) {\n    let c = ch.codePointAt(0);\n    if (c < 0x80) bytes.push(c);\n    else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63));\n    else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n    else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n  }\n  const K = [];\n  const H = [];\n  for (let n = 2, found = 0; found < 64; n++) {\n    let prime = true;\n    for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }\n    if (!prime) continue;\n    if (found < 8) H.push((Math.pow(n, 1 / 2) % 1) * 2 ** 32 | 0);\n    K.push((Math.pow(n, 1 / 3) % 1) * 2 ** 32 | 0);\n    found++;\n  }\n  const bitLen = bytes.length * 8;\n  bytes.push(0x80);\n  while (bytes.length % 64 !== 56) bytes.push(0);\n  for (let i = 7; i >= 0; i--) bytes.push(i > 3 ? Math.floor(bitLen / 2 ** (8 * i)) & 255 : (bitLen >>> (8 * i)) & 255);\n  const rotr = (x, n) => (x >>> n) | (x << (32 - n));\n  const w = new Array(64);\n  for (let off = 0; off < bytes.length; off += 64) {\n    for (let i = 0; i < 16; i++) {\n      w[i] = (bytes[off + 4 * i] << 24) | (bytes[off + 4 * i + 1] << 16) | (bytes[off + 4 * i + 2] << 8) | bytes[off + 4 * i + 3];\n    }\n    for (let i = 16; i < 64; i++) {\n      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);\n      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);\n      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;\n    }\n    let [a, b, c, d, e, f, g, h] = H;\n    for (let i = 0; i < 64; i++) {\n      const t1 = (h + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;\n      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;\n      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;\n    }\n    [a, b, c, d, e, f, g, h].forEach((v, i) => { H[i] = (H[i] + v) | 0; });\n  }\n  return H.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');\n};\n\nconst agent = $input.first().json;\nconst steps = agent.intermediateSteps ?? [];\n// The same test as the \"Empty agent reply?\" node: a document validated on such a turn was never shown.\nconst emptyReply = String(agent.output ?? '').trim() === '';\nconst name = (s) => String(s.action?.tool ?? '').replace(/^MCP_Client_/, '');\nconst result = (s) => {\n  try {\n    return JSON.parse(JSON.parse(s.observation).find((c) => c.type === 'text').text);\n  } catch (e) {\n    return null;\n  }\n};\n\n// Static data, per chat session: the latest validated document with its result, and the hash and\n// counts of every validated document.\nconst sessionId = $('When chat message received').first().json.sessionId;\nconst sd = $getWorkflowStaticData('global');\nsd.sessions ??= {};\nconst session = (sd.sessions[sessionId] ??= { turns: 0, history: [] });\nsession.turns += 1;\n\n// Remove every gate report the agent wrote itself: the header line, the lines under it up to a blank\n// line, and the \"---\" line above it.\nconst kept = [];\nlet removed = 0;\nconst text = String(agent.output).split('\\n');\nfor (let i = 0; i < text.length; i++) {\n  if (!text[i].trimStart().startsWith('Gate report (from the tool calls')) { kept.push(text[i]); continue; }\n  removed++;\n  if (kept.length && kept[kept.length - 1].trim() === '---') kept.pop();\n  while (i + 1 < text.length && text[i + 1].trim() !== '') i++;\n}\nconst reply = kept.join('\\n').trimEnd();\n\nconst names = steps.map(name);\nconst counts = {};\nfor (const n of names) counts[n] = (counts[n] ?? 0) + 1;\nconst lines = ['Gate report (from the tool calls, not the agent)'];\nif (removed) lines.push(`- Removed ${removed} gate report(s) the agent wrote itself.`);\nlines.push(names.length\n  ? `- Tool calls this turn (${names.length}): ${names.join(', ')}. Count of each: ` +\n    Object.entries(counts).map(([n, c]) => `${n} ${c}`).join(', ') + '.'\n  : '- Tool calls this turn: none.');\n\nconst validates = steps.filter((s) => name(s) === 'scenario_document_validate');\nif (!validates.length) {\n  if (session.latest?.errors !== 0) lines.push('- No validate call this turn.');\n} else {\n  lines.push(`- Validate calls this turn (${validates.length}), in order:`);\n  validates.forEach((s, i) => {\n    const document = s.action.toolInput.document;\n    const hash = sha256(document).slice(0, 12);\n    const r = result(s);\n    const errors = r?.data?.errors ?? null;\n    const warnings = r?.data?.warnings ?? null;\n    lines.push(`  - #${i + 1} ${hash} | ${errors ?? 'unknown'} errors | ${warnings ?? 'unknown'} warnings`);\n    session.history.push({ hash, turn: session.turns, errors, warnings });\n    session.latest = { hash, turn: session.turns, errors, warnings, document };\n    if (emptyReply) session.latest.unshown = true;\n  });\n  const validate = validates[validates.length - 1];\n  const r = result(validate);\n  if (!r?.data?.findings) {\n    lines.push(`- Last validate this turn: no readable result. Raw: ${String(validate.observation).slice(0, 300)}`);\n  } else {\n    lines.push(`- Last validate this turn: ${r.data.errors} errors, ${r.data.warnings} warnings, ` +\n      `${r.data.findings.length} findings:`);\n    for (const f of r.data.findings) lines.push(`  - ${f.code} | ${f.severity} | ${f.path} | ${f.message}`);\n  }\n}\n\nconst imp = steps.filter((s) => name(s) === 'scenario_document_import').pop();\nif (imp) {\n  const r = result(imp);\n  const lossy = (r?.data?.findings ?? []).filter((f) => f.code === 'STORAGE_LOSSY').length;\n  lines.push(r\n    ? `- Import this turn: HTTP ${r.status}, scenario id ${r.data?.id ?? 'none'}, ${lossy} STORAGE_LOSSY findings.`\n    : `- Import this turn: no readable result. Raw: ${String(imp.observation).slice(0, 300)}`);\n}\n\nconst latest = session.latest;\nlet importHash = null;\nif (latest?.imported) {\n  lines.push(`- Document ${latest.hash} was imported as scenario ${latest.imported.scenarioId} on turn ${latest.imported.turn}.`);\n} else if (latest?.unshown && latest.errors === 0) {\n  lines.push(`- Document ${latest.hash} was validated on turn ${latest.turn}, but the agent's reply on that turn was empty, ` +\n    'so its plan was never shown. It cannot be imported. Send your message again.');\n} else if (latest?.errors === 0) {\n  importHash = latest.hash;\n  if (!validates.length) lines.push(`- No validate this turn. The import line is for the document validated on turn ${latest.turn}.`);\n  lines.push(`- To import this document, send: import ${latest.hash} (validated on turn ${latest.turn})`);\n}\n\nconst gateReport = lines.join('\\n');\n// The page's short view of this reply: the agent's text, one status line, the hash for the Import button\n// (only when the import line above is shown) with that document's bytes, and the full report.\nlet status = !validates.length\n  ? (latest ? `No new validation this turn. The latest document was validated on turn ${latest.turn}.` : 'No document validated yet.')\n  : latest.errors === 0 ? `Validated: no errors, ${latest.warnings} warnings.` : `Not valid yet: ${latest.errors ?? 'unknown'} errors.`;\nif (latest?.unshown && latest.errors === 0 && !latest.imported) {\n  status += ' Its plan was never shown, so it cannot be imported. Send your message again.';\n}\n// The warnings of the turn's last validate the developer must act on, one entry per code. STORAGE_LOSSY needs\n// no action; infos are not listed.\nconst lastFindings = (validates.length ? result(validates[validates.length - 1])?.data?.findings : null) ?? [];\n// DRYRUN_NPCS on /population/pools itself means the document declares no pools at all.\nconst noPools = lastFindings.some((f) => f.code === 'DRYRUN_NPCS' && f.path === '/population/pools');\nconst attentionLines = {\n  REF_UNSET_FLAG: (n) => n === 1\n    ? '1 condition reads a flag that nothing in the document sets. Check that it is a flag the white cell raises ' +\n      'during play, not a typo.'\n    : `${n} conditions read a flag that nothing in the document sets. Check that each one is a flag the white ` +\n      'cell raises during play, not a typo.',\n  FLAG_NEVER_READ: (n) => n === 1\n    ? '1 flag is set but never read. Add the condition that should read it, or remove the flag.'\n    : `${n} flags are set but never read. Add the condition that should read each one, or remove the flag.`,\n  DRYRUN_NPCS: (n) => noPools\n    ? 'The document declares no population pools, so the exercise has no one to animate. Add a pool.'\n    : n === 1\n      ? '1 population pool generates nobody. Give it a count, or remove it.'\n      : `${n} population pools generate nobody. Give each one a count, or remove it.`,\n  WORKFLOW_NOT_REGISTERED: (n) => n === 1\n    ? \"1 entry in the document's workflow list names an n8n workflow that is not registered. Register the \" +\n      'workflow, or correct the name.'\n    : `${n} entries in the document's workflow list name an n8n workflow that is not registered. Register ` +\n      'each workflow, or correct the name.',\n  ATTACK_DEPRECATED_TECHNIQUE: (n) => n === 1\n    ? 'The document uses a deprecated ATT&CK technique in 1 place. Replace it with its current technique.'\n    : `The document uses deprecated ATT&CK techniques in ${n} places. Replace each one with its current technique.`,\n  REF_UNKNOWN_HOST: (n) => n === 1\n    ? '1 host name in an event description is not a host the document defines. Add the host, or correct the name.'\n    : `${n} host names in event descriptions are not hosts the document defines. Add each host, or correct the name.`,\n};\nconst warningCounts = {};\nfor (const f of lastFindings) {\n  if (f.severity === 'warning' && f.code !== 'STORAGE_LOSSY') warningCounts[f.code] = (warningCounts[f.code] ?? 0) + 1;\n}\nconst attention = Object.entries(warningCounts)\n  .map(([code, count]) => ({ code, count, line: attentionLines[code]?.(count) ?? `${count} × ${code}: see Details.` }));\n// The model: the session's model, as \"Session model\" names it.\nconst model = $('Session model').first().json.modelView;\nconst view = { reply, status, importHash, document: importHash ? latest.document : null, report: gateReport, model, attention };\n// The memory's copy of the report: after a validate it also holds the latest validated document, so the\n// agent keeps it without pasting it into a reply.\nconst memoryReport = validates.length\n  ? `${gateReport}\\n\\nWorkflow's copy of the latest validated document, ${latest.hash} (turn ${latest.turn}), exactly as validated:\\n${latest.document}`\n  : gateReport;\nreturn [{ json: { output: `${reply}\\n\\n---\\n${gateReport}`, gateReport, memoryReport, view } }];\n"
       }
     },
     {
@@ -287,7 +287,7 @@
         -112
       ],
       "parameters": {
-        "jsCode": "// The refusal Import check wrote; nothing was validated or imported. The memory manager outputs only\n// {success: true}, so the reply is read from Import check.\nconst { output } = $('Import check').first().json;\nconst reason = output.split('\\n- ')[1];\nconst status = `Not imported: ${reason.slice(0, reason.indexOf('. ') + 1)}`;\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nreturn [{ json: { output, view: { reply: '', status, importHash: null, report: output, model } } }];"
+        "jsCode": "// The refusal Import check wrote; nothing was validated or imported. The memory manager outputs only\n// {success: true}, so the reply is read from Import check.\nconst { output } = $('Import check').first().json;\nconst reason = output.split('\\n- ')[1];\nconst status = `Not imported: ${reason.slice(0, reason.indexOf('. ') + 1)}`;\n// The model: the session's model, as \"Session model\" names it.\nconst model = $('Session model').first().json.modelView;\nreturn [{ json: { output, view: { reply: '', status, importHash: null, report: output, model } } }];"
       }
     },
     {
@@ -495,7 +495,7 @@
         -312
       ],
       "parameters": {
-        "jsCode": "// Import path, step 3: the workflow's report of what it validated and imported, from the MCP results.\nconst message = (res, id) => String(res.data).split('\\n').filter((l) => l.startsWith('data: '))\n  .map((l) => JSON.parse(l.slice(6))).find((m) => m.id === id);\nconst { hash } = $('Import check').first().json;\nconst v = $('Revalidate check').first().json;\nconst lines = ['Import report (from the workflow, not the agent)',\n  `- Validated again: document ${hash}, ${v.errors} errors, ${v.warnings} warnings, ${v.findings} findings.`];\nlet status;\nlet scenarioId = null;\nif (!$('MCP import').isExecuted) {\n  status = `Not imported: document ${hash} no longer passes validation.`;\n  lines.push(`- Not imported: document ${hash} no longer passes validation.`);\n} else {\n  const r = JSON.parse(message($('MCP import').first().json, 3).result.content.find((c) => c.type === 'text').text);\n  const lossy = (r.data?.findings ?? []).filter((f) => f.code === 'STORAGE_LOSSY').length;\n  if (r.data?.id != null) {\n    const session = $getWorkflowStaticData('global').sessions[$('When chat message received').first().json.sessionId];\n    session.latest.imported = { scenarioId: r.data.id, turn: session.turns };\n    scenarioId = r.data.id;\n  }\n  status = scenarioId != null ? `Imported as scenario ${scenarioId}.` : `Not imported: the import returned HTTP ${r.status}.`;\n  lines.push(`- Imported: HTTP ${r.status}, scenario id ${r.data?.id ?? 'none'}, ${lossy} STORAGE_LOSSY findings, document ${hash}.`);\n}\nconst importReport = lines.join('\\n');\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nreturn [{ json: { output: importReport, importReport, view: { reply: '', status, importHash: null, scenarioId, report: importReport, model } } }];\n"
+        "jsCode": "// Import path, step 3: the workflow's report of what it validated and imported, from the MCP results.\nconst message = (res, id) => String(res.data).split('\\n').filter((l) => l.startsWith('data: '))\n  .map((l) => JSON.parse(l.slice(6))).find((m) => m.id === id);\nconst { hash } = $('Import check').first().json;\nconst v = $('Revalidate check').first().json;\nconst lines = ['Import report (from the workflow, not the agent)',\n  `- Validated again: document ${hash}, ${v.errors} errors, ${v.warnings} warnings, ${v.findings} findings.`];\nlet status;\nlet scenarioId = null;\nif (!$('MCP import').isExecuted) {\n  status = `Not imported: document ${hash} no longer passes validation.`;\n  lines.push(`- Not imported: document ${hash} no longer passes validation.`);\n} else {\n  const r = JSON.parse(message($('MCP import').first().json, 3).result.content.find((c) => c.type === 'text').text);\n  const lossy = (r.data?.findings ?? []).filter((f) => f.code === 'STORAGE_LOSSY').length;\n  if (r.data?.id != null) {\n    const session = $getWorkflowStaticData('global').sessions[$('When chat message received').first().json.sessionId];\n    session.latest.imported = { scenarioId: r.data.id, turn: session.turns };\n    scenarioId = r.data.id;\n  }\n  status = scenarioId != null ? `Imported as scenario ${scenarioId}.` : `Not imported: the import returned HTTP ${r.status}.`;\n  lines.push(`- Imported: HTTP ${r.status}, scenario id ${r.data?.id ?? 'none'}, ${lossy} STORAGE_LOSSY findings, document ${hash}.`);\n}\nconst importReport = lines.join('\\n');\n// The model: the session's model, as \"Session model\" names it.\nconst model = $('Session model').first().json.modelView;\nreturn [{ json: { output: importReport, importReport, view: { reply: '', status, importHash: null, scenarioId, report: importReport, model } } }];\n"
       }
     },
     {
@@ -666,7 +666,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// The agent node failed (after its one retry) and sent the error here. The agent saves a turn to memory\n// only when it succeeds, so nothing of this turn was kept. n8n passes on Bedrock's message but not the\n// exception name; step 11i's replays got this message only as ServiceUnavailableException (HTTP 503).\nconst message = String($input.first().json.error ?? '');\nconst exception = message === 'Bedrock is unable to process your request.' ? 'ServiceUnavailableException (HTTP 503)' : null;\nconst report = `Bedrock's message: ${message}` +\n  (exception ? `\\nException: ${exception}, from the message; n8n does not pass the name on.` : '');\n// The model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\".\nconst modelId = String($('AWS Bedrock Chat Model').params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)-(\\d+)/);\nconst model = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}` : modelId };\nreturn [{ json: { output: `This turn failed, so there is no reply.\\n\\n---\\n${report}`,\n  view: { reply: '', status: 'failed', importHash: null, report, model, error: message, exception } } }];"
+        "jsCode": "// The agent node failed (after its one retry) and sent the error here, or \"Session model\" refused an\n// unknown model before any model call. The agent saves a turn to memory only when it succeeds, so nothing\n// of this turn was kept. n8n passes on Bedrock's message but not the exception name; step 11i's replays\n// got this message only as ServiceUnavailableException (HTTP 503).\nconst message = String($input.first().json.error ?? '');\nconst session = $('Session model').first().json.model;\nconst isBedrock = session === 'bedrock-opus' || session === 'bedrock-sonnet';\nconst exception = isBedrock && message === 'Bedrock is unable to process your request.'\n  ? 'ServiceUnavailableException (HTTP 503)' : null;\nconst source = { 'bedrock-opus': \"Bedrock's message\", 'bedrock-sonnet': \"Bedrock's message\",\n  'ollama-gemma': \"Ollama's message\", 'ollama-glimmer': \"Ollama's message\" }[session];\nconst report = `${source ?? \"The workflow's message\"}: ${message}` +\n  (exception ? `\\nException: ${exception}, from the message; n8n does not pass the name on.` : '');\n// The model: the session's model, as \"Session model\" names it.\nconst model = $('Session model').first().json.modelView;\nreturn [{ json: { output: `This turn failed, so there is no reply.\\n\\n---\\n${report}`,\n  view: { reply: '', status: 'failed', importHash: null, report, model, error: message, exception } } }];"
       },
       "id": "5d0c6a1e-7f3b-4c2a-9e8d-1b4f6a2c9e11",
       "name": "Reply with failure notice",
@@ -676,6 +676,229 @@
         2048,
         260
       ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The session's model: \"bedrock-opus\", \"bedrock-sonnet\", \"ollama-gemma\" or \"ollama-glimmer\". \"bedrock\" is\n// an older spelling of \"bedrock-opus\" -- what step 11l's sessions stored, and what a message with no field\n// has always meant -- so a stored or sent \"bedrock\" is aliased to \"bedrock-opus\" here. The session's first\n// turn stores the page's choice in its static-data entry; every later turn uses the stored value and\n// ignores the field. Any other value is refused here, before any model call.\nconst chat = $('When chat message received').first().json;\nconst nodes = { 'bedrock-opus': 'AWS Bedrock Chat Model', 'bedrock-sonnet': 'AWS Bedrock Chat Model (Sonnet)',\n  'ollama-gemma': 'Ollama Chat Model (gemma)', 'ollama-glimmer': 'Ollama Chat Model (Glimmer)' };\nconst alias = (m) => (m === 'bedrock' ? 'bedrock-opus' : m);\nconst sd = $getWorkflowStaticData('global');\nsd.sessions ??= {};\nlet model = alias(sd.sessions[chat.sessionId]?.model);\nif (!sd.sessions[chat.sessionId]) {\n  const asked = alias(chat.model ?? 'bedrock-opus');\n  if (!Object.hasOwn(nodes, asked)) {\n    return [{ json: { ...chat, model: null, modelView: null,\n      error: `Unknown model \"${asked}\". The allowed values are \"bedrock-opus\", \"bedrock-sonnet\", \"ollama-gemma\" and \"ollama-glimmer\".` } }];\n  }\n  sd.sessions[chat.sessionId] = { turns: 0, history: [], model: asked };\n  model = asked;\n}\n// Sessions started before the choice existed ran on Bedrock Opus.\nmodel ??= 'bedrock-opus';\n// The view's model: the chat model node's configured id, since neither its run data nor the agent's output\n// names the model that answered. \"us.anthropic.claude-opus-5-5\" is shown as \"Claude Opus 5.5\"; a model id\n// with one version number, like \"us.anthropic.claude-sonnet-5\", is shown as \"Claude Sonnet 5\".\nconst modelId = String($(nodes[model]).params.model);\nconst family = modelId.match(/claude-([a-z]+)-(\\d+)(?:-(\\d+))?/);\nconst modelView = { id: modelId, source: 'configured',\n  name: family ? `Claude ${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}${family[3] ? `.${family[3]}` : ''}` : modelId };\nreturn [{ json: { ...chat, model, modelView } }];"
+      },
+      "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f401",
+      "name": "Session model",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        96
+      ]
+    },
+    {
+      "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f402",
+      "name": "Known model?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        96
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f403",
+              "leftValue": "={{ $json.model !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 4,
+        "rules": {
+          "rule": [
+            {
+              "modelIndex": 1,
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f404",
+                    "leftValue": "={{ $json.model }}",
+                    "rightValue": "bedrock-opus",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "modelIndex": 2,
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "4e2f6a3b-9c15-4d8e-b1a7-7f0c2e5d9a64",
+                    "leftValue": "={{ $json.model }}",
+                    "rightValue": "bedrock-sonnet",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "modelIndex": 3,
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f405",
+                    "leftValue": "={{ $json.model }}",
+                    "rightValue": "ollama-gemma",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "modelIndex": 4,
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f408",
+                    "leftValue": "={{ $json.model }}",
+                    "rightValue": "ollama-glimmer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        }
+      },
+      "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f406",
+      "name": "Model Selector",
+      "type": "@n8n/n8n-nodes-langchain.modelSelector",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gemma4:31b-mlx",
+        "options": {
+          "keepAlive": "2h"
+        }
+      },
+      "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f407",
+      "name": "Ollama Chat Model (gemma)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        900
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "mtUpraWiZrXqvmNH",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "muse-glimmer:30b-mlx",
+        "options": {
+          "keepAlive": "2h"
+        }
+      },
+      "id": "3b8e5c21-4d7a-4f19-a6c2-11e0b5d9f409",
+      "name": "Ollama Chat Model (Glimmer)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        1100
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "mtUpraWiZrXqvmNH",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelSource": "inferenceProfile",
+        "model": "us.anthropic.claude-sonnet-5",
+        "options": {
+          "maxTokensToSample": 16384
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1.1,
+      "position": [
+        1568,
+        900
+      ],
+      "id": "4e2f6a3b-9c15-4d8e-b1a7-7f0c2e5d9a63",
+      "name": "AWS Bedrock Chat Model (Sonnet)",
+      "credentials": {
+        "aws": {
+          "id": "AwsBedrockStp10b",
+          "name": "AWS Bedrock (step 10b)"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -684,7 +907,7 @@
       "main": [
         [
           {
-            "node": "Import command?",
+            "node": "Session model",
             "type": "main",
             "index": 0
           }
@@ -695,7 +918,7 @@
       "ai_languageModel": [
         [
           {
-            "node": "Scenario Authoring Agent",
+            "node": "Model Selector",
             "type": "ai_languageModel",
             "index": 0
           }
@@ -997,6 +1220,79 @@
             "node": "Delete empty turn from memory",
             "type": "ai_memory",
             "index": 0
+          }
+        ]
+      ]
+    },
+    "Session model": {
+      "main": [
+        [
+          {
+            "node": "Known model?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Known model?": {
+      "main": [
+        [
+          {
+            "node": "Import command?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply with failure notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model (gemma)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Model Selector",
+            "type": "ai_languageModel",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model (Glimmer)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Model Selector",
+            "type": "ai_languageModel",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Model Selector": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Scenario Authoring Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AWS Bedrock Chat Model (Sonnet)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Model Selector",
+            "type": "ai_languageModel",
+            "index": 1
           }
         ]
       ]

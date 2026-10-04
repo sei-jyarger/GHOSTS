@@ -207,9 +207,32 @@
             bottom: 0;
             background: var(--bg);
             display: flex;
+            flex-wrap: wrap;
             gap: 0.5rem;
             padding: 0.75rem 1.25rem;
             border-top: 1px solid var(--border);
+        }
+
+        /* The session's model, above the message box. */
+        fieldset {
+            flex-basis: 100%;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            font-size: 0.9rem;
+        }
+
+        fieldset legend {
+            padding: 0;
+            font-weight: 600;
+        }
+
+        fieldset label { display: block; }
+
+        fieldset .note {
+            padding-left: 1.6rem;
+            color: var(--secondary);
+            font-size: 0.85rem;
         }
 
         textarea {
@@ -239,6 +262,14 @@
     <main id="log"></main>
 
     <form id="send">
+        <fieldset id="choice">
+            <legend>Model</legend>
+            <label><input type="radio" name="model" value="bedrock-opus" checked /> Bedrock: Claude Opus 5.5</label>
+            <label><input type="radio" name="model" value="bedrock-sonnet" /> Bedrock: Claude Sonnet 5</label>
+            <label><input type="radio" name="model" value="ollama-gemma" /> Local: gemma4:31b-mlx</label>
+            <label><input type="radio" name="model" value="ollama-glimmer" /> Local: muse-glimmer:30b-mlx</label>
+            <div class="note">A local model can take 30–60 minutes for a drafting turn, and only one session at a time should use it.</div>
+        </fieldset>
         <textarea id="text" placeholder="Message the Scenario Authoring Agent"></textarea>
         <button type="submit">Send</button>
     </form>
@@ -273,11 +304,16 @@
         if (!resumed) localStorage.setItem(key, sessionId = crypto.randomUUID());
         // The model named by the latest view, for the header after a reload.
         const modelKey = "ghosts-scenario-authoring-import/model";
+        // The session's model, chosen before its first send and locked after it. The workflow keeps the first
+        // turn's choice for the session and ignores the field after that.
+        const choiceKey = "ghosts-scenario-authoring-import/choice";
+        if (!resumed) localStorage.removeItem(choiceKey);
 
         const log = document.getElementById("log");
         const form = document.getElementById("send");
         const input = document.getElementById("text");
         const modelLine = document.getElementById("model");
+        const choice = document.getElementById("choice");
         let busy = false;
 
         const el = (tag, className, text) => {
@@ -290,6 +326,18 @@
         const modelLabel = (model) => `${model.name}${model.source === "configured" ? " (configured model)" : ""}`;
         const showModel = (model, lastReply) => {
             modelLine.textContent = model ? `${modelLabel(model)}${lastReply ? ", last reply" : ""}` : "no reply yet";
+        };
+        const lockChoice = (value) => {
+            if (value === "bedrock") value = "bedrock-opus"; // a choice stored by step 11l's page, before Sonnet existed
+            localStorage.setItem(choiceKey, value);
+            for (const r of choice.querySelectorAll("input")) { r.checked = r.value === value; r.disabled = true; }
+            const label = choice.querySelector(`input[value="${value}"]`).parentElement.textContent.trim();
+            choice.querySelector("legend").textContent = `Model, locked for this conversation: ${label}`;
+        };
+        const unlockChoice = () => {
+            localStorage.removeItem(choiceKey);
+            for (const r of choice.querySelectorAll("input")) { r.checked = r.value === "bedrock-opus"; r.disabled = false; }
+            choice.querySelector("legend").textContent = "Model";
         };
         // A post: avatar, name, time, and for the agent the model; the body is returned for the content. A
         // post from memory has no time, and shows none.
@@ -379,15 +427,20 @@
             busy = true;
             form.querySelector("button").disabled = true;
             userPost(text, new Date());
-            const waiting = add(el("div", "waiting", "Working… 0 s"));
+            if (!localStorage.getItem(choiceKey)) lockChoice(choice.querySelector("input:checked").value);
+            const model = localStorage.getItem(choiceKey);
+            const waiting = add(el("div", "waiting", "Working… 0 min 0 s"));
             const started = Date.now();
-            const tick = setInterval(() => { waiting.textContent = `Working… ${Math.floor((Date.now() - started) / 1000)} s`; }, 1000);
+            const tick = setInterval(() => {
+                const s = Math.floor((Date.now() - started) / 1000);
+                waiting.textContent = `Working… ${Math.floor(s / 60)} min ${s % 60} s`;
+            }, 1000);
             let view;
             try {
                 const res = await fetch(webhookUrl, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ action: "sendMessage", sessionId, chatInput: text }),
+                    body: JSON.stringify({ action: "sendMessage", sessionId, chatInput: text, model }),
                 });
                 const body = await res.text();
                 let json = null;
@@ -417,6 +470,8 @@
                 body: JSON.stringify({ action: "loadPreviousSession", sessionId }),
             });
             const { data = [] } = await res.json();
+            // A session from before the choice existed ran on Bedrock.
+            if (data.length && !localStorage.getItem(choiceKey)) lockChoice("bedrock");
             let last = null;
             for (const m of data) {
                 const content = String(m.kwargs?.content ?? "");
@@ -447,11 +502,13 @@
             if (busy) return;
             localStorage.setItem(key, sessionId = crypto.randomUUID());
             localStorage.removeItem(modelKey);
+            unlockChoice();
             log.replaceChildren();
             showModel(null);
             greet();
         });
 
+        if (localStorage.getItem(choiceKey)) lockChoice(localStorage.getItem(choiceKey));
         const stored = localStorage.getItem(modelKey);
         showModel(stored ? JSON.parse(stored) : null, true);
         greet();
