@@ -61,7 +61,7 @@
         "modelSource": "inferenceProfile",
         "model": "us.anthropic.claude-opus-5-5",
         "options": {
-          "maxTokensToSample": 16384
+          "maxTokensToSample": 64000
         }
       },
       "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
@@ -882,7 +882,7 @@
         "modelSource": "inferenceProfile",
         "model": "us.anthropic.claude-sonnet-5",
         "options": {
-          "maxTokensToSample": 16384
+          "maxTokensToSample": 64000
         }
       },
       "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
@@ -1301,7 +1301,8 @@
   "active": false,
   "settings": {
     "executionOrder": "v1",
-    "binaryMode": "separate"
+    "binaryMode": "separate",
+    "executionTimeout": 1800
   },
   "id": "GhScenAuthor0004",
   "tags": []

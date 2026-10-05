@@ -287,6 +287,9 @@
         const n8nUrl = (params.get("n8n") || "http://localhost:5678").replace(/\/+$/, "");
         const uiUrl = (params.get("ui") || "http://localhost:4200").replace(/\/+$/, "");
         const webhookUrl = `${n8nUrl}/webhook/ghosts-scenario-authoring-import/chat`;
+        // The workflow's own execution timeout (step 11q), so the page can tell that failure apart from
+        // any other. Overridable for testing, since waiting out the real 1800s isn't practical to check.
+        const turnTimeoutSeconds = Number(params.get("timeout")) || 1800;
 
         const md = markdownit({ html: false });
         const defaultLink = md.renderer.rules.link_open ?? ((t, i, o, e, s) => s.renderToken(t, i, o));
@@ -385,6 +388,13 @@
 
         // A failed turn: the workflow's view says "failed", or the webhook answered with no view.
         const failedStatus = "This turn failed, so there is no reply. Your message was not kept. Send it again.";
+        // The same notice, worded from the configured timeout itself (minutes once it reaches one, seconds
+        // below that -- the real 1800s default reads "30 minutes"; a ?timeout=5 test reads "5 seconds").
+        const timeoutStatus = () => {
+            const s = turnTimeoutSeconds;
+            const unit = s >= 60 ? `${Math.round(s / 60)} minute${Math.round(s / 60) === 1 ? "" : "s"}` : `${s} second${s === 1 ? "" : "s"}`;
+            return `The turn took longer than ${unit} and was stopped, so it was not saved. Send your message again.`;
+        };
 
         function showReply(view) {
             // Every older Import button is disabled once a newer reply has arrived.
@@ -445,7 +455,13 @@
                 const body = await res.text();
                 let json = null;
                 try { json = JSON.parse(body); } catch { }
+                // n8n's own execution-timeout cancellation never reaches the workflow's failure notice, so
+                // it has no `view`; this exact shape is how it reports that (and, in practice, little else,
+                // since every error the workflow itself handles already comes back with a view).
+                const waitedSeconds = (Date.now() - started) / 1000;
+                const timedOut = !res.ok && json?.message === "There was a problem executing the workflow" && waitedSeconds >= turnTimeoutSeconds;
                 view = res.ok && json?.view ? json.view
+                    : timedOut ? { reply: "", status: timeoutStatus(), importHash: null, report: `HTTP ${res.status}\n${body}` }
                     : { reply: "", status: "failed", importHash: null, report: `HTTP ${res.status}\n${body}` };
             } catch (e) {
                 view = { reply: "", status: "failed", importHash: null, report: String(e) };
