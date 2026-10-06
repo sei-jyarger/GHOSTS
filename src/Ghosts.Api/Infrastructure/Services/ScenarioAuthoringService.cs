@@ -1,0 +1,560 @@
+// Copyright 2017 Carnegie Mellon University. All Rights Reserved. See LICENSE.md file for terms.
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+using Amazon.BedrockRuntime;
+using Amazon.BedrockRuntime.Model;
+using Amazon.Runtime;
+using Ghosts.Api.Infrastructure.Data;
+using Ghosts.Api.Infrastructure.Models;
+using Ghosts.Api.Infrastructure.ScenarioDocuments;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using NLog;
+
+namespace Ghosts.Api.Infrastructure.Services
+{
+    public interface IScenarioAuthoringService
+    {
+        Task<AuthoringSession> CreateSessionAsync(CancellationToken ct);
+        Task<AuthoringTurnResult> RunTurnAsync(Guid sessionId, string message, CancellationToken ct);
+        Task<object> GetSessionAsync(Guid sessionId, CancellationToken ct);
+        Task<AuthoringImportResult> ImportAsync(Guid sessionId, string hash, bool again, CancellationToken ct);
+    }
+
+    public record AuthoringToolCall(string Name, bool Ok);
+
+    public record AuthoringDocumentStatus(string Hash, int Turn, int Errors, int Warnings, bool Shown, int? ImportedScenarioId);
+
+    /// <summary>
+    /// One turn's result. On a failure Reply is empty, Failure names the cause (B5), and the gate report still
+    /// lists what the turn did, including any document it validated and kept (C2).
+    /// </summary>
+    public record AuthoringTurnResult(
+        int Turn,
+        string Reply,
+        string GateReport,
+        IReadOnlyList<AuthoringToolCall> ToolCalls,
+        IReadOnlyList<AuthoringDocumentStatus> Validations,
+        AuthoringDocumentStatus LatestDocument,
+        bool CanImport,
+        AuthoringFailure Failure);
+
+    /// <summary>Cause is "model error", "timeout" or "empty reply".</summary>
+    public record AuthoringFailure(string Cause, string Notice, string Details);
+
+    public record AuthoringImportResult(bool Imported, int? ScenarioId, string Hash, string Reason, bool NeedsConfirmation, string Report);
+
+    public class AuthoringSessionBusyException(Guid id) : Exception($"A turn or an import is already running in session {id}.");
+
+    /// <summary>
+    /// Scenario authoring as a service of the API: the agent loop of the n8n prototype (GhScenAuthor0004),
+    /// with the server's checks around it. The model drafts and validates; the server keeps the record, writes
+    /// the gate report, and imports only on the developer's action.
+    /// </summary>
+    public class ScenarioAuthoringService : IScenarioAuthoringService
+    {
+        private static readonly Logger _log = LogManager.GetCurrentClassLogger();
+
+        // One turn or import at a time per session; sessions run side by side (C6).
+        private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> Locks = new();
+
+        private static readonly Lazy<string> DefaultPrompt = new(() => File.ReadAllText(Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory, "config", "ContentServices", "ScenarioAuthoring", "system-prompt.md")));
+
+        private readonly ApplicationDbContext _context;
+        private readonly IScenarioService _scenarios;
+        private readonly IAuthoringModel _model;
+        private readonly IHttpClientFactory _clients;
+        private readonly ScenarioAuthoringOptions _options;
+        private readonly ScenarioAuthoringTools _tools;
+        private readonly string _prompt;
+
+        public ScenarioAuthoringService(
+            ApplicationDbContext context,
+            IScenarioService scenarios,
+            IAuthoringModel model,
+            IServiceScopeFactory scopes,
+            IHttpClientFactory clients,
+            IOptions<ScenarioAuthoringOptions> options,
+            string systemPrompt = null)
+        {
+            _context = context;
+            _scenarios = scenarios;
+            _model = model;
+            _clients = clients;
+            _options = options.Value;
+            _tools = new ScenarioAuthoringTools(scopes, clients, TimeSpan.FromSeconds(_options.ValidatorTimeoutSeconds));
+            _prompt = systemPrompt;
+        }
+
+        /// <summary>A turn's limit, as configured in minutes. A test sets a shorter one.</summary>
+        public TimeSpan? TurnLimitOverride { get; set; }
+
+        public async Task<AuthoringSession> CreateSessionAsync(CancellationToken ct)
+        {
+            var session = new AuthoringSession { Id = Guid.NewGuid(), Model = _options.Model };
+            _context.AuthoringSessions.Add(session);
+            await _context.SaveChangesAsync(ct);
+            return session;
+        }
+
+        // ───────────── a turn ─────────────
+
+        public async Task<AuthoringTurnResult> RunTurnAsync(Guid sessionId, string message, CancellationToken ct)
+        {
+            var gate = Locks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
+            if (!await gate.WaitAsync(0, ct)) throw new AuthoringSessionBusyException(sessionId);
+            try
+            {
+                return await RunTurnLockedAsync(sessionId, message, ct);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        private async Task<AuthoringTurnResult> RunTurnLockedAsync(Guid sessionId, string message, CancellationToken ct)
+        {
+            var session = await _context.AuthoringSessions.FirstOrDefaultAsync(s => s.Id == sessionId, ct)
+                          ?? throw new KeyNotFoundException($"No authoring session {sessionId}.");
+
+            var turn = (await _context.AuthoringMessages.Where(m => m.SessionId == sessionId)
+                .MaxAsync(m => (int?)m.Turn, ct) ?? 0) + 1;
+
+            // The conversation the model sees: every kept message, in order (C3, C4).
+            var stored = await _context.AuthoringMessages.AsNoTracking()
+                .Where(m => m.SessionId == sessionId && m.InHistory)
+                .OrderBy(m => m.Turn).ThenBy(m => m.Sequence)
+                .ToListAsync(ct);
+            var conversation = stored.Select(m => new Message
+            {
+                Role = m.Role == AuthoringMessage.ModelRole ? ConversationRole.Assistant : ConversationRole.User,
+                Content = AuthoringBlocks.FromJson(m.Content)
+            }).ToList();
+
+            // The developer's message, after anything the server has to tell the model first.
+            var opening = new List<ContentBlock>();
+            if (!string.IsNullOrWhiteSpace(session.PendingNote)) opening.Add(new ContentBlock { Text = session.PendingNote });
+            opening.Add(new ContentBlock { Text = message });
+            conversation.Add(new Message { Role = ConversationRole.User, Content = opening });
+
+            var rows = new List<AuthoringMessage>();
+            AddRow(rows, sessionId, turn, AuthoringMessage.Developer, opening);
+
+            var calls = new List<AuthoringToolCall>();
+            var validated = new List<AuthoringDocument>();
+
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limit.CancelAfter(TurnLimitOverride ?? TimeSpan.FromMinutes(_options.TurnTimeoutMinutes));
+
+            string reply = null;
+            AuthoringFailure failure = null;
+            try
+            {
+                while (true)
+                {
+                    var response = await CallModelAsync(session.Model, conversation, rows, sessionId, turn, limit.Token);
+                    var content = response.Output?.Message?.Content ?? [];
+                    conversation.Add(new Message { Role = ConversationRole.Assistant, Content = content });
+
+                    var uses = content.Where(b => b.ToolUse != null).Select(b => b.ToolUse).ToList();
+                    if (uses.Count == 0)
+                    {
+                        // The reply's text is the first block that holds text, whatever comes before it.
+                        reply = content.FirstOrDefault(b => b.Text != null)?.Text;
+                        break;
+                    }
+
+                    var results = new List<ContentBlock>();
+                    foreach (var use in uses)
+                    {
+                        var outcome = await _tools.RunAsync(use.Name, AuthoringBlocks.ToJson(use.Input), limit.Token);
+                        calls.Add(new AuthoringToolCall(use.Name, outcome.Ok));
+                        if (outcome.Validation != null) validated.Add(await KeepAsync(sessionId, turn, outcome.Validation));
+
+                        results.Add(new ContentBlock
+                        {
+                            ToolResult = new ToolResultBlock
+                            {
+                                ToolUseId = use.ToolUseId,
+                                Status = outcome.Ok ? ToolResultStatus.Success : ToolResultStatus.Error,
+                                Content = [new ToolResultContentBlock { Text = outcome.Text }]
+                            }
+                        });
+                    }
+                    AddRow(rows, sessionId, turn, AuthoringMessage.Tool, results);
+                    conversation.Add(new Message { Role = ConversationRole.User, Content = results });
+                }
+
+                if (string.IsNullOrWhiteSpace(reply))
+                    failure = Failed("empty reply", "The model returned an empty reply.");
+            }
+            catch (OperationCanceledException) when (limit.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                failure = Failed("timeout",
+                    $"The turn reached its limit of {(TurnLimitOverride ?? TimeSpan.FromMinutes(_options.TurnTimeoutMinutes)).TotalMinutes:0.##} minutes, and the model call it was waiting on was cancelled.");
+            }
+            catch (AuthoringModelException ex)
+            {
+                failure = Failed("model error", ex.Message);
+            }
+
+            // Kept for the record either way (H1); only a turn that succeeded joins the conversation (C4).
+            foreach (var row in rows) row.InHistory = failure == null;
+            _context.AuthoringMessages.AddRange(rows);
+
+            var documents = await _context.AuthoringDocuments.Where(d => d.SessionId == sessionId)
+                .OrderBy(d => d.Id).ToListAsync(CancellationToken.None);
+            var latest = documents.LastOrDefault();
+
+            // A3: the latest validated document has now been shown, in a reply that came back.
+            if (failure == null && latest != null) latest.Shown = true;
+
+            var report = GateReport(turn, calls, validated, latest, documents, failure);
+
+            // A turn that succeeded delivered the note; the next one gets this turn's gate report. A failed turn
+            // delivered nothing, so its note stays for the next try.
+            if (failure == null)
+                session.PendingNote = "Server note (from the GHOSTS server, not the developer). The gate report of your previous turn:\n" + report;
+            session.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync(CancellationToken.None);
+
+            return new AuthoringTurnResult(
+                turn,
+                failure == null ? reply : string.Empty,
+                report,
+                calls,
+                validated.Select(Status).ToList(),
+                latest == null ? null : Status(latest),
+                CanImport(latest, documents),
+                failure);
+        }
+
+        private static AuthoringFailure Failed(string cause, string details) => new(
+            cause,
+            "This turn failed, so there is no reply, and your message was not kept. Send it again.",
+            details);
+
+        /// <summary>
+        /// One model call, retried once on HTTP 503 (F4). Every attempt is a row with its usage and stop
+        /// reason from the provider's response (H1); a failed attempt records its error instead.
+        /// </summary>
+        private async Task<ConverseResponse> CallModelAsync(string model, List<Message> conversation,
+            List<AuthoringMessage> rows, Guid sessionId, int turn, CancellationToken limit)
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                var request = new ConverseRequest
+                {
+                    ModelId = model,
+                    System = [new SystemContentBlock { Text = _prompt ?? DefaultPrompt.Value }],
+                    Messages = conversation,
+                    ToolConfig = ScenarioAuthoringTools.Configuration(),
+                    // Temperature is not sent: newer Anthropic models on Bedrock reject it.
+                    InferenceConfig = new InferenceConfiguration { MaxTokens = _options.MaxOutputTokens }
+                };
+
+                var row = new AuthoringMessage
+                {
+                    SessionId = sessionId, Turn = turn, Sequence = rows.Count, Role = AuthoringMessage.ModelRole,
+                    StartedAt = DateTime.UtcNow
+                };
+                rows.Add(row);
+                try
+                {
+                    var response = await _model.ConverseAsync(request, limit);
+                    row.EndedAt = DateTime.UtcNow;
+                    row.Content = AuthoringBlocks.ToJson(response.Output?.Message?.Content).ToJsonString();
+                    row.InputTokens = response.Usage?.InputTokens;
+                    row.OutputTokens = response.Usage?.OutputTokens;
+                    row.CacheReadTokens = response.Usage?.CacheReadInputTokens;
+                    row.CacheWriteTokens = response.Usage?.CacheWriteInputTokens;
+                    row.StopReason = response.StopReason?.Value;
+                    return response;
+                }
+                catch (OperationCanceledException) when (limit.IsCancellationRequested)
+                {
+                    row.EndedAt = DateTime.UtcNow;
+                    row.Error = "Cancelled: the turn reached its limit.";
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    row.EndedAt = DateTime.UtcNow;
+                    row.Error = $"{ex.GetType().Name}: {ex.Message}";
+                    _log.Warn($"Authoring model call failed, session {sessionId}, turn {turn}, attempt {attempt}: {row.Error}");
+                    if (attempt == 1 && IsUnavailable(ex)) continue;
+                    throw new AuthoringModelException(row.Error, ex);
+                }
+            }
+        }
+
+        private static bool IsUnavailable(Exception ex) =>
+            ex is ServiceUnavailableException
+            || (ex is AmazonServiceException s && (int)s.StatusCode == 503);
+
+        /// <summary>C2: a validation is kept the moment it returns, inside the turn, whatever happens next.</summary>
+        private async Task<AuthoringDocument> KeepAsync(Guid sessionId, int turn, AuthoringValidation v)
+        {
+            var document = new AuthoringDocument
+            {
+                SessionId = sessionId,
+                Turn = turn,
+                Hash = v.Hash,
+                Document = v.Document,
+                Errors = v.Errors,
+                Warnings = v.Warnings,
+                Findings = JsonSerializer.Serialize(v.Findings, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                DryRun = v.DryRun
+            };
+            _context.AuthoringDocuments.Add(document);
+            await _context.SaveChangesAsync(CancellationToken.None);
+            return document;
+        }
+
+        private static void AddRow(List<AuthoringMessage> rows, Guid sessionId, int turn, string role, IEnumerable<ContentBlock> content) =>
+            rows.Add(new AuthoringMessage
+            {
+                SessionId = sessionId, Turn = turn, Sequence = rows.Count, Role = role,
+                Content = AuthoringBlocks.ToJson(content).ToJsonString()
+            });
+
+        private static AuthoringDocumentStatus Status(AuthoringDocument d) =>
+            new(d.Hash, d.Turn, d.Errors, d.Warnings, d.Shown, d.ImportedScenarioId);
+
+        private static bool CanImport(AuthoringDocument latest, IReadOnlyList<AuthoringDocument> documents) =>
+            latest is { Errors: 0, Shown: true, ImportedScenarioId: null }
+            && !documents.Any(d => d.Hash == latest.Hash && d.ImportedScenarioId != null);
+
+        /// <summary>
+        /// B1: the server's account of the turn, from the tool calls it ran and the validator's results, never
+        /// from the model's text.
+        /// </summary>
+        private static string GateReport(int turn, IReadOnlyList<AuthoringToolCall> calls, IReadOnlyList<AuthoringDocument> validated,
+            AuthoringDocument latest, IReadOnlyList<AuthoringDocument> documents, AuthoringFailure failure)
+        {
+            var lines = new List<string> { $"Gate report, turn {turn} (from the server's tool calls, not the agent)" };
+            if (failure != null) lines.Add($"- The turn failed ({failure.Cause}); it was not kept. {failure.Details}");
+
+            lines.Add(calls.Count == 0
+                ? "- Tool calls this turn: none."
+                : $"- Tool calls this turn ({calls.Count}): {string.Join(", ", calls.Select(c => c.Ok ? c.Name : $"{c.Name} (failed)"))}. Count of each: " +
+                  string.Join(", ", calls.GroupBy(c => c.Name).Select(g => $"{g.Key} {g.Count()}")) + ".");
+
+            if (validated.Count == 0)
+            {
+                lines.Add("- No validate call this turn.");
+            }
+            else
+            {
+                lines.Add($"- Validate calls this turn ({validated.Count}), in order:");
+                for (var i = 0; i < validated.Count; i++)
+                {
+                    var v = validated[i];
+                    lines.Add($"  - #{i + 1} {v.Hash} | {v.Errors} errors | {v.Warnings} warnings{(v.DryRun ? " | dry run" : string.Empty)}");
+                }
+                var last = validated[^1];
+                var findings = JsonSerializer.Deserialize<List<JsonObject>>(last.Findings) ?? [];
+                lines.Add($"- Last validate this turn: {last.Errors} errors, {last.Warnings} warnings, {findings.Count} findings:");
+                foreach (var f in findings)
+                    lines.Add($"  - {f["code"]} | {f["severity"]} | {f["path"]} | {f["message"]}");
+            }
+
+            if (latest == null)
+                lines.Add("- No document validated yet in this session.");
+            else if (latest.ImportedScenarioId != null)
+                lines.Add($"- Document {latest.Hash} was imported as scenario {latest.ImportedScenarioId}.");
+            else if (latest.Errors != 0)
+                lines.Add($"- The latest document, {latest.Hash} (turn {latest.Turn}), has {latest.Errors} errors, so it cannot be imported.");
+            else if (!latest.Shown)
+                lines.Add($"- Document {latest.Hash} was validated on turn {latest.Turn}, but no reply has shown it, so it cannot be imported yet.");
+            else if (documents.Any(d => d.Hash == latest.Hash && d.ImportedScenarioId != null))
+                lines.Add($"- Document {latest.Hash} was imported before; importing it again needs confirmation.");
+            else
+                lines.Add($"- Document {latest.Hash} (validated on turn {latest.Turn}) can be imported with the Import button.");
+
+            return string.Join("\n", lines);
+        }
+
+        // ───────────── the record ─────────────
+
+        public async Task<object> GetSessionAsync(Guid sessionId, CancellationToken ct)
+        {
+            var session = await _context.AuthoringSessions.AsNoTracking().FirstOrDefaultAsync(s => s.Id == sessionId, ct);
+            if (session == null) return null;
+
+            var messages = await _context.AuthoringMessages.AsNoTracking().Where(m => m.SessionId == sessionId)
+                .OrderBy(m => m.Turn).ThenBy(m => m.Sequence).ToListAsync(ct);
+            var documents = await _context.AuthoringDocuments.AsNoTracking().Where(d => d.SessionId == sessionId)
+                .OrderBy(d => d.Id).ToListAsync(ct);
+            var calls = messages.Where(m => m.Role == AuthoringMessage.ModelRole).ToList();
+
+            return new
+            {
+                session.Id,
+                session.Model,
+                session.Status,
+                session.ImportedScenarioId,
+                session.CreatedAt,
+                session.UpdatedAt,
+                messages = messages.Select(m => new
+                {
+                    m.Turn,
+                    m.Sequence,
+                    m.Role,
+                    m.InHistory,
+                    content = WithoutReasoning(m.Content),
+                    m.InputTokens,
+                    m.OutputTokens,
+                    m.CacheReadTokens,
+                    m.CacheWriteTokens,
+                    m.StopReason,
+                    m.Error,
+                    m.StartedAt,
+                    m.EndedAt
+                }),
+                documents = documents.Select(d => new
+                {
+                    d.Turn,
+                    d.Hash,
+                    d.Errors,
+                    d.Warnings,
+                    d.DryRun,
+                    d.Shown,
+                    d.ImportedScenarioId,
+                    d.CreatedAt,
+                    findings = JsonNode.Parse(d.Findings)?.ToJsonString(),
+                    document = d.Document
+                }),
+                tokens = new
+                {
+                    modelCalls = calls.Count,
+                    input = calls.Sum(m => m.InputTokens ?? 0),
+                    output = calls.Sum(m => m.OutputTokens ?? 0),
+                    cacheRead = calls.Sum(m => m.CacheReadTokens ?? 0),
+                    cacheWrite = calls.Sum(m => m.CacheWriteTokens ?? 0)
+                }
+            };
+        }
+
+        /// <summary>The stored blocks as JSON text, with each reasoning block reduced to a marker.</summary>
+        private static string WithoutReasoning(string content)
+        {
+            var array = JsonNode.Parse(content)?.AsArray() ?? [];
+            var kept = new JsonArray();
+            foreach (var block in array)
+                kept.Add(block?["reasoningContent"] != null ? new JsonObject { ["reasoningContent"] = "omitted" } : block?.DeepClone());
+            return kept.ToJsonString();
+        }
+
+        // ───────────── the import ─────────────
+
+        /// <summary>
+        /// The only way from a session to the database (A1). Only the session's latest document, validated with
+        /// 0 errors and shown (A2, A3); its exact bytes are validated again, then imported by the same path as
+        /// POST api/scenarios/import. A hash imported before needs again: true (A4).
+        /// </summary>
+        public async Task<AuthoringImportResult> ImportAsync(Guid sessionId, string hash, bool again, CancellationToken ct)
+        {
+            var gate = Locks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
+            if (!await gate.WaitAsync(0, ct)) throw new AuthoringSessionBusyException(sessionId);
+            try
+            {
+                return await ImportLockedAsync(sessionId, hash?.Trim().ToLowerInvariant(), again, ct);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        private async Task<AuthoringImportResult> ImportLockedAsync(Guid sessionId, string hash, bool again, CancellationToken ct)
+        {
+            var session = await _context.AuthoringSessions.FirstOrDefaultAsync(s => s.Id == sessionId, ct)
+                          ?? throw new KeyNotFoundException($"No authoring session {sessionId}.");
+            var documents = await _context.AuthoringDocuments.Where(d => d.SessionId == sessionId).OrderBy(d => d.Id).ToListAsync(ct);
+            var latest = documents.LastOrDefault();
+
+            string refusal = null;
+            var confirm = false;
+            if (string.IsNullOrEmpty(hash))
+                refusal = "No hash was given.";
+            else if (latest == null)
+                refusal = "Nothing has been validated in this session.";
+            else if (hash != latest.Hash)
+                refusal = documents.Any(d => d.Hash == hash)
+                    ? $"{hash} is not the latest validated document. The latest is {latest.Hash}, from turn {latest.Turn}."
+                    : $"{hash} is not a document of this session. The latest is {latest.Hash}, from turn {latest.Turn}.";
+            else if (latest.Errors != 0)
+                refusal = $"{hash} did not pass validation ({latest.Errors} errors).";
+            else if (!latest.Shown)
+                refusal = $"{hash} was validated on turn {latest.Turn}, but no reply has shown it. Send your message again, and import from the next report.";
+            else
+            {
+                var before = await _context.AuthoringDocuments.AsNoTracking()
+                    .Where(d => d.Hash == hash && d.ImportedScenarioId != null)
+                    .Select(d => d.ImportedScenarioId).FirstOrDefaultAsync(ct);
+                if (before != null && !again)
+                {
+                    refusal = $"{hash} was already imported as scenario {before}. To import a second copy, send the import again with \"again\": true.";
+                    confirm = true;
+                }
+            }
+
+            if (refusal != null) return await RefuseAsync(session, hash, refusal, confirm);
+
+            // A2: the same bytes, validated again, then the import endpoint's own sequence.
+            var document = JsonNode.Parse(latest.Document) as JsonObject;
+            var result = await ScenarioDocumentValidator.ValidateAsync(document, _clients, ct);
+            if (!result.IsValid)
+                return await RefuseAsync(session, hash, $"{hash} no longer passes validation ({result.Errors} errors).", false);
+
+            var lossy = StorageLossAnalyzer.Analyze(document);
+            var scenario = await _scenarios.ImportDocumentAsync(document, [.. result.Findings, .. lossy], ct);
+
+            // ImportDocumentAsync clears this context's change tracker, so the session's rows are read again.
+            latest = await _context.AuthoringDocuments.FirstAsync(d => d.Id == latest.Id, CancellationToken.None);
+            session = await _context.AuthoringSessions.FirstAsync(s => s.Id == sessionId, CancellationToken.None);
+            latest.ImportedScenarioId = scenario.Id;
+            session.ImportedScenarioId = scenario.Id;
+            var report = "Import report (from the server, not the agent)\n" +
+                         $"- Validated again: document {hash}, {result.Errors} errors, {result.Warnings} warnings, {result.Findings.Count} findings.\n" +
+                         $"- Imported: scenario id {scenario.Id}, {lossy.Count} STORAGE_LOSSY findings, document {hash}.";
+            AppendNote(session, report);
+            await _context.SaveChangesAsync(CancellationToken.None);
+            _log.Info($"Authoring session {session.Id} imported document {hash} as scenario {scenario.Id}");
+
+            return new AuthoringImportResult(true, scenario.Id, hash, null, false, report);
+        }
+
+        private async Task<AuthoringImportResult> RefuseAsync(AuthoringSession session, string hash, string reason, bool confirm)
+        {
+            var report = $"Import report (from the server, not the agent)\n- {reason} Nothing was imported.";
+            AppendNote(session, report);
+            await _context.SaveChangesAsync(CancellationToken.None);
+            return new AuthoringImportResult(false, null, hash, reason, confirm, report);
+        }
+
+        private static void AppendNote(AuthoringSession session, string text)
+        {
+            session.PendingNote = string.IsNullOrWhiteSpace(session.PendingNote)
+                ? "Server note (from the GHOSTS server, not the developer).\n" + text
+                : session.PendingNote + "\n\n" + text;
+            session.UpdatedAt = DateTime.UtcNow;
+        }
+    }
+
+    public class AuthoringModelException(string message, Exception inner) : Exception(message, inner);
+}
