@@ -219,15 +219,27 @@ namespace Ghosts.Api.Infrastructure.Services
                 .OrderBy(d => d.Id).ToListAsync(CancellationToken.None);
             var latest = documents.LastOrDefault();
 
-            // A3: the latest validated document has now been shown, in a reply that came back.
-            if (failure == null && latest != null) latest.Shown = true;
+            // A3: a document is shown only by a reply that came back, and only when that reply's turn validated it,
+            // or the reply names its hash. A failed or empty turn shows nothing, whatever it validated.
+            if (failure == null)
+            {
+                var validatedNow = validated.Select(d => d.Hash).ToHashSet();
+                foreach (var d in documents.Where(d => !d.Shown))
+                    if (validatedNow.Contains(d.Hash) || reply.Contains(d.Hash, StringComparison.OrdinalIgnoreCase))
+                        d.Shown = true;
+            }
 
             var report = GateReport(turn, calls, validated, latest, documents, failure);
 
             // A turn that succeeded delivered the note; the next one gets this turn's gate report. A failed turn
-            // delivered nothing, so its note stays for the next try.
+            // delivered nothing, so its note stays for the next try, with what it validated: the model never saw it.
             if (failure == null)
                 session.PendingNote = "Server note (from the GHOSTS server, not the developer). The gate report of your previous turn:\n" + report;
+            else if (validated.Count > 0)
+                AppendNote(session,
+                    $"The developer's previous message failed ({failure.Cause}) and was not kept, so you did not see that turn. " +
+                    $"It validated {validated.Count} document(s), which the developer has not been shown: " +
+                    string.Join("; ", validated.Select(d => $"{d.Hash} ({d.Errors} errors, {d.Warnings} warnings)")) + ".");
             session.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync(CancellationToken.None);
 
@@ -238,7 +250,7 @@ namespace Ghosts.Api.Infrastructure.Services
                 calls,
                 validated.Select(Status).ToList(),
                 latest == null ? null : Status(latest),
-                CanImport(latest, documents),
+                ImportRefusal(latest) == null && !await ImportedBeforeAsync(latest!.Hash),
                 failure);
         }
 
@@ -334,9 +346,21 @@ namespace Ghosts.Api.Infrastructure.Services
         private static AuthoringDocumentStatus Status(AuthoringDocument d) =>
             new(d.Hash, d.Turn, d.Errors, d.Warnings, d.Shown, d.ImportedScenarioId);
 
-        private static bool CanImport(AuthoringDocument latest, IReadOnlyList<AuthoringDocument> documents) =>
-            latest is { Errors: 0, Shown: true, ImportedScenarioId: null }
-            && !documents.Any(d => d.Hash == latest.Hash && d.ImportedScenarioId != null);
+        /// <summary>
+        /// The import rule, for the turn's canImport and for the import endpoint alike (A2, A3): the session's
+        /// latest validated document, validated with 0 errors, and shown. Null when it holds, otherwise why not.
+        /// The endpoint also checks that the hash it was given is that document's; a hash imported before is a
+        /// separate, second gate (A4).
+        /// </summary>
+        private static string ImportRefusal(AuthoringDocument latest) =>
+            latest == null ? "Nothing has been validated in this session."
+            : latest.Errors != 0 ? $"{latest.Hash} did not pass validation ({latest.Errors} errors)."
+            : !latest.Shown ? $"{latest.Hash} is not shown: it was validated on turn {latest.Turn}, and no reply has shown it. " +
+                              "A reply shows it when it comes back from the turn that validated it, or when it names its hash."
+            : null;
+
+        private async Task<bool> ImportedBeforeAsync(string hash) =>
+            await _context.AuthoringDocuments.AsNoTracking().AnyAsync(d => d.Hash == hash && d.ImportedScenarioId != null);
 
         /// <summary>
         /// B1: the server's account of the turn, from the tool calls it ran and the validator's results, never
@@ -491,16 +515,12 @@ namespace Ghosts.Api.Infrastructure.Services
             var confirm = false;
             if (string.IsNullOrEmpty(hash))
                 refusal = "No hash was given.";
-            else if (latest == null)
-                refusal = "Nothing has been validated in this session.";
-            else if (hash != latest.Hash)
+            else if (latest != null && hash != latest.Hash)
                 refusal = documents.Any(d => d.Hash == hash)
                     ? $"{hash} is not the latest validated document. The latest is {latest.Hash}, from turn {latest.Turn}."
                     : $"{hash} is not a document of this session. The latest is {latest.Hash}, from turn {latest.Turn}.";
-            else if (latest.Errors != 0)
-                refusal = $"{hash} did not pass validation ({latest.Errors} errors).";
-            else if (!latest.Shown)
-                refusal = $"{hash} was validated on turn {latest.Turn}, but no reply has shown it. Send your message again, and import from the next report.";
+            else if (ImportRefusal(latest) is { } rule)
+                refusal = rule;
             else
             {
                 var before = await _context.AuthoringDocuments.AsNoTracking()

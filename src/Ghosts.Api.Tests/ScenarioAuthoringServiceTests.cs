@@ -288,6 +288,124 @@ public class ScenarioAuthoringServiceTests
         Assert.Contains("Nothing was imported", session2.PendingNote);
     }
 
+    // ───────── the rule for "shown" (A3): only a reply that came back shows a document ─────────
+
+    [Fact]
+    public async Task A_document_validated_in_a_turn_whose_last_call_failed_is_kept_not_shown_and_refused()
+    {
+        var db = NewDatabase();
+        await using var context = db();
+        var document = ValidDocument();
+        var (service, session, hash) = await AfterAFailedTurnAsync(context, document);
+
+        var kept = Assert.Single(await context.AuthoringDocuments.ToListAsync());
+        Assert.Equal(hash, kept.Hash);
+        Assert.Equal(0, kept.Errors);
+        Assert.False(kept.Shown);
+
+        var result = await service.ImportAsync(session, hash, false, default);
+        Assert.False(result.Imported);
+        Assert.Contains("not shown", result.Reason);
+        Assert.Equal(0, await context.Scenarios.CountAsync());
+    }
+
+    [Fact]
+    public async Task The_note_before_the_turn_after_a_failure_names_the_saved_documents_hash_errors_and_warnings()
+    {
+        var db = NewDatabase();
+        await using var context = db();
+        var document = ValidDocument();
+        var (_, session, hash) = await AfterAFailedTurnAsync(context, document);
+        var kept = await context.AuthoringDocuments.SingleAsync();
+
+        string? note = null;
+        var next = new ScriptedModel(r =>
+        {
+            // The failed turn is not in the history, so the developer's new message is the only one, and the
+            // server's note comes first in it.
+            var opening = Assert.Single(r.Messages);
+            Assert.Equal(2, opening.Content.Count);
+            note = opening.Content[0].Text;
+            return Reply(Text("Noted."));
+        });
+        await Service(context, next).RunTurnAsync(session, "Try again.", default);
+
+        Assert.NotNull(note);
+        Assert.Contains($"{hash} ({kept.Errors} errors, {kept.Warnings} warnings)", note);
+        Assert.Contains("failed (model error)", note);
+    }
+
+    [Fact]
+    public async Task A_later_reply_that_does_not_name_the_hash_leaves_the_document_not_shown()
+    {
+        var db = NewDatabase();
+        await using var context = db();
+        var (service, session, hash) = await AfterAFailedTurnAsync(context, ValidDocument());
+
+        var turn = await Service(context, new ScriptedModel(_ => Reply(Text("The plan is above.")))).RunTurnAsync(session, "Go on.", default);
+
+        Assert.Null(turn.Failure);
+        Assert.False(turn.LatestDocument!.Shown);
+        Assert.False(turn.CanImport);
+        Assert.False((await context.AuthoringDocuments.SingleAsync()).Shown);
+        var result = await service.ImportAsync(session, hash, false, default);
+        Assert.False(result.Imported);
+        Assert.Contains("not shown", result.Reason);
+    }
+
+    [Fact]
+    public async Task A_later_reply_that_names_the_hash_shows_the_document_and_the_import_succeeds()
+    {
+        var db = NewDatabase();
+        await using var context = db();
+        var (service, session, hash) = await AfterAFailedTurnAsync(context, ValidDocument());
+        await Service(context, new ScriptedModel(_ => Reply(Text("The plan is above.")))).RunTurnAsync(session, "Go on.", default);
+
+        var turn = await Service(context, new ScriptedModel(_ => Reply(Text($"Here is the plan for document {hash}."))))
+            .RunTurnAsync(session, "Show me.", default);
+
+        Assert.True(turn.LatestDocument!.Shown);
+        Assert.True(turn.CanImport);
+        var result = await service.ImportAsync(session, hash, false, default);
+        Assert.True(result.Imported, result.Reason);
+        Assert.Equal(1, await context.Scenarios.CountAsync());
+    }
+
+    [Fact]
+    public async Task A_document_from_a_failed_turn_validated_again_in_a_returned_turn_is_shown()
+    {
+        var db = NewDatabase();
+        await using var context = db();
+        var document = ValidDocument();
+        var (service, session, hash) = await AfterAFailedTurnAsync(context, document);
+
+        var turn = await Service(context, new ScriptedModel(
+                _ => Reply(Use("v2", "scenario_document_validate", Input(document))),
+                _ => Reply(Text("Validated again; the plan is above."))))
+            .RunTurnAsync(session, "Validate it again.", default);
+
+        Assert.Null(turn.Failure);
+        Assert.Equal(hash, turn.LatestDocument!.Hash);
+        Assert.True(turn.LatestDocument.Shown);
+        Assert.True(turn.CanImport);
+        Assert.All(await context.AuthoringDocuments.ToListAsync(), d => Assert.True(d.Shown));
+        Assert.True((await service.ImportAsync(session, hash, false, default)).Imported);
+    }
+
+    /// <summary>A turn validates the document, then its last call fails (not a 503, so it is not retried).</summary>
+    private static async Task<(ScenarioAuthoringService Service, Guid Session, string Hash)> AfterAFailedTurnAsync(
+        ApplicationDbContext context, string document)
+    {
+        var service = Service(context, new ScriptedModel(
+            _ => Reply(Use("v1", "scenario_document_validate", Input(document))),
+            _ => throw new ThrottlingException("Too many requests.")));
+        var session = await service.CreateSessionAsync(default);
+        var turn = await service.RunTurnAsync(session.Id, "Draft it.", default);
+        Assert.Equal("model error", turn.Failure?.Cause);
+        Assert.False(turn.CanImport);
+        return (service, session.Id, ScenarioAuthoringTools.Hash(document));
+    }
+
     // ───────── g: two sessions at once ─────────
 
     [Fact]
